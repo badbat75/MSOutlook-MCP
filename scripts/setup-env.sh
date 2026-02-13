@@ -75,7 +75,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         value=$(echo "$value" | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//')
 
         # Set environment variable
-        export "$key=$value"
+        export "${key}=${value}"
     fi
 done < "$ENV_FILE"
 
