@@ -206,23 +206,52 @@ def main():
             # Just the code provided
             auth_response = {"code": args.code}
     else:
-        # Callback server mode
+        # Callback server mode with manual fallback
         print("Waiting for authorization callback on http://localhost:5000 ...")
         print()
-        print("💡 TIP: If authorizing from a different device, you can also run:")
-        print(f"   python outlook_mcp_auth.py --code '<paste-full-callback-url>'")
+        print("💡 TIP: If the callback doesn't work (remote device), press Ctrl+C")
+        print("   and you'll be prompted to paste the callback URL manually.")
         print()
 
         server = HTTPServer(("localhost", 5000), CallbackHandler)
+        auth_response = None
 
-        while CallbackHandler.auth_code is None:
-            server.handle_request()
+        try:
+            while CallbackHandler.auth_code is None:
+                server.handle_request()
 
-        server.server_close()
+            server.server_close()
 
-        # Complete the flow
-        parsed = urlparse(f"http://localhost:5000{CallbackHandler.full_url}")
-        auth_response = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            # Got callback - parse it
+            parsed = urlparse(f"http://localhost:5000{CallbackHandler.full_url}")
+            auth_response = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+
+        except KeyboardInterrupt:
+            server.server_close()
+            print()
+            print()
+            print("=" * 60)
+            print("Manual Authorization")
+            print("=" * 60)
+            print()
+            print("Paste the FULL callback URL from your browser:")
+            print("(It should look like: http://localhost:5000/callback?code=...)")
+            print()
+
+            callback_url = input("Callback URL: ").strip()
+
+            if callback_url:
+                # Parse the pasted URL
+                if callback_url.startswith("http"):
+                    parsed = urlparse(callback_url)
+                    auth_response = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+                else:
+                    # Assume it's just the code
+                    auth_response = {"code": callback_url}
+            else:
+                print()
+                print("❌ No URL provided. Exiting.")
+                sys.exit(1)
 
     result = app.acquire_token_by_auth_code_flow(flow, auth_response)
 
