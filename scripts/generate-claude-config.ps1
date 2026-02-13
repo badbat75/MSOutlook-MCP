@@ -100,16 +100,23 @@ if ($missing.Count -gt 0) {
 # Build config object
 # =============================================================================
 
+$envConfig = @{
+    OUTLOOK_CLIENT_ID     = $envVars["OUTLOOK_CLIENT_ID"]
+    OUTLOOK_CLIENT_SECRET = $envVars["OUTLOOK_CLIENT_SECRET"]
+    OUTLOOK_TENANT_ID     = $envVars["OUTLOOK_TENANT_ID"]
+}
+
+# Add optional OUTLOOK_DOWNLOAD_PATH if present
+if ($envVars["OUTLOOK_DOWNLOAD_PATH"] -and -not [string]::IsNullOrWhiteSpace($envVars["OUTLOOK_DOWNLOAD_PATH"])) {
+    $envConfig["OUTLOOK_DOWNLOAD_PATH"] = $envVars["OUTLOOK_DOWNLOAD_PATH"]
+}
+
 $config = @{
     mcpServers = @{
         MS_Outlook_MCP = @{
             command = $venvPython
             args    = @($serverScript)
-            env     = @{
-                OUTLOOK_CLIENT_ID     = $envVars["OUTLOOK_CLIENT_ID"]
-                OUTLOOK_CLIENT_SECRET = $envVars["OUTLOOK_CLIENT_SECRET"]
-                OUTLOOK_TENANT_ID     = $envVars["OUTLOOK_TENANT_ID"]
-            }
+            env     = $envConfig
         }
     }
 }

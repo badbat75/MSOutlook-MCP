@@ -221,3 +221,22 @@ class ListCalendarsInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     top: int = Field(default=10, description="Max calendars to return", ge=1, le=50)
+
+
+class ListAttachmentsInput(BaseModel):
+    """Input for listing email attachments."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    message_id: str = Field(..., description="The message ID to retrieve attachments from", min_length=1)
+
+
+class GetAttachmentInput(BaseModel):
+    """Input for downloading a specific attachment."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    message_id: str = Field(..., description="The message ID containing the attachment", min_length=1)
+    attachment_id: str = Field(..., description="The attachment ID to download", min_length=1)
+    save_to_disk: bool = Field(
+        default=False,
+        description="Ignored - all attachments are always saved to disk (base64 streaming is too heavy for MCP protocol). Path configurable via OUTLOOK_DOWNLOAD_PATH env var (default: ~/Downloads/outlook_attachments/)"
+    )

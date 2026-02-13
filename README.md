@@ -9,6 +9,8 @@ MCP (Model Context Protocol) server that connects Claude to Microsoft Outlook vi
 |------|-------------|
 | `outlook_list_mail` | List emails with OData filters, full-text search, pagination |
 | `outlook_get_mail` | Full email details (body, headers, attachments) |
+| `outlook_list_attachments` | List attachment metadata for a message |
+| `outlook_get_attachment` | Download attachment to disk (path configurable via env var) |
 | `outlook_send_mail` | Send email with HTML, CC/BCC, importance |
 | `outlook_create_draft` | Create draft email without sending |
 | `outlook_reply_mail` | Reply or Reply All |
@@ -122,17 +124,23 @@ source ./scripts/setup-env.sh
 **Or set them manually:**
 
 ```powershell
-# Windows PowerShell
+# Windows PowerShell - Required variables
 $env:OUTLOOK_CLIENT_ID = "your-client-id"
 $env:OUTLOOK_CLIENT_SECRET = "your-client-secret"
 $env:OUTLOOK_TENANT_ID = "your-tenant-id"   # or "common"
+
+# Optional: Custom download path for attachments
+$env:OUTLOOK_DOWNLOAD_PATH = "C:\Users\YourName\Documents\Outlook_Attachments"
 ```
 
 ```bash
-# macOS/Linux Bash
+# macOS/Linux Bash - Required variables
 export OUTLOOK_CLIENT_ID="your-client-id"
 export OUTLOOK_CLIENT_SECRET="your-client-secret"
 export OUTLOOK_TENANT_ID="your-tenant-id"   # or "common"
+
+# Optional: Custom download path for attachments
+export OUTLOOK_DOWNLOAD_PATH="$HOME/Documents/outlook_attachments"
 ```
 
 ### 4. Authorize (First Time)
@@ -192,7 +200,8 @@ Add to your Claude Desktop config file (`claude_desktop_config.json`):
       "env": {
         "OUTLOOK_CLIENT_ID": "your-client-id",
         "OUTLOOK_CLIENT_SECRET": "your-client-secret",
-        "OUTLOOK_TENANT_ID": "your-tenant-id"
+        "OUTLOOK_TENANT_ID": "your-tenant-id",
+        "OUTLOOK_DOWNLOAD_PATH": "C:\\Users\\YourName\\Documents\\Outlook_Attachments"
       }
     }
   }

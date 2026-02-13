@@ -6,7 +6,8 @@
       "env": {
         "OUTLOOK_CLIENT_ID": "YOUR_CLIENT_ID",
         "OUTLOOK_CLIENT_SECRET": "YOUR_CLIENT_SECRET",
-        "OUTLOOK_TENANT_ID": "YOUR_TENANT_ID"
+        "OUTLOOK_TENANT_ID": "YOUR_TENANT_ID",
+        "OUTLOOK_DOWNLOAD_PATH": "C:\\Users\\YourName\\Documents\\Outlook_Attachments"
       }
     }
   }

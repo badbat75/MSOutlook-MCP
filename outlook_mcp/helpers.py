@@ -1,6 +1,9 @@
 """Formatting helpers and utility functions."""
 
+import base64
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import List
 
 import httpx
@@ -116,3 +119,138 @@ def get_day_of_week(iso_date: str) -> str:
         return days[dt.weekday()]
     except Exception:
         return "monday"
+
+
+# Attachment handling constants
+# Read download path from env var, fallback to default
+_download_path = os.environ.get("OUTLOOK_DOWNLOAD_PATH")
+if _download_path:
+    ATTACHMENT_DOWNLOAD_DIR = Path(_download_path)
+else:
+    ATTACHMENT_DOWNLOAD_DIR = Path.home() / "Downloads" / "outlook_attachments"
+
+MAX_INLINE_SIZE_MB = 10
+VIEWABLE_IMAGE_TYPES = {
+    "image/png", "image/jpeg", "image/jpg", "image/gif",
+    "image/bmp", "image/webp", "image/svg+xml"
+}
+ANALYZABLE_TYPES = {
+    "application/pdf", "text/plain", "text/html", "text/csv",
+    "application/json", "application/xml", "text/xml"
+}
+
+
+def format_attachment_summary(attachment: dict) -> str:
+    """Format an attachment metadata for display.
+
+    Args:
+        attachment: Graph API attachment object
+
+    Returns:
+        str: Formatted attachment summary with type, name, size
+    """
+    att_type = attachment.get("@odata.type", "")
+    name = attachment.get("name", "(unnamed)")
+    size_bytes = attachment.get("size", 0)
+    content_type = attachment.get("contentType", "unknown")
+    att_id = attachment.get("id", "")
+
+    # Format size
+    if size_bytes < 1024:
+        size_str = f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        size_str = f"{size_bytes / 1024:.1f} KB"
+    else:
+        size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+
+    # Icon based on type
+    icon = "📎"
+    if "image" in content_type:
+        icon = "🖼️"
+    elif "pdf" in content_type:
+        icon = "📄"
+    elif "zip" in content_type or "compressed" in content_type:
+        icon = "🗜️"
+    elif "word" in content_type or "document" in content_type:
+        icon = "📝"
+    elif "excel" in content_type or "spreadsheet" in content_type:
+        icon = "📊"
+
+    # Type indicator
+    type_label = ""
+    if att_type == "#microsoft.graph.fileAttachment":
+        type_label = "File"
+    elif att_type == "#microsoft.graph.itemAttachment":
+        type_label = "Item (email/meeting)"
+    elif att_type == "#microsoft.graph.referenceAttachment":
+        type_label = "Reference (cloud)"
+
+    return (
+        f"{icon} **{name}**\n"
+        f"   Type: {type_label} ({content_type})\n"
+        f"   Size: {size_str}\n"
+        f"   ID: `{att_id}`"
+    )
+
+
+def should_save_to_disk(content_type: str, size_bytes: int, force_disk: bool) -> bool:
+    """Determine if an attachment should be saved to disk vs returned as base64.
+
+    Args:
+        content_type: MIME type of the attachment
+        size_bytes: Size in bytes
+        force_disk: User-requested force save to disk
+
+    Returns:
+        bool: Always True - base64 streaming is too heavy for MCP, save everything to disk
+    """
+    # Always save to disk - base64 data URLs are too heavy for MCP protocol
+    return True
+
+
+def create_data_url(content_type: str, base64_content: str) -> str:
+    """Create a data URL from base64 content.
+
+    Args:
+        content_type: MIME type
+        base64_content: Base64-encoded content
+
+    Returns:
+        str: data URL that Claude can render
+    """
+    return f"data:{content_type};base64,{base64_content}"
+
+
+def save_attachment_to_disk(filename: str, content_bytes: bytes) -> str:
+    """Save attachment bytes to disk.
+
+    Args:
+        filename: Original filename
+        content_bytes: Raw file bytes
+
+    Returns:
+        str: Absolute path to saved file
+
+    Raises:
+        OSError: If save fails
+    """
+    # Create directory if needed
+    ATTACHMENT_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Sanitize filename (remove path traversal attempts)
+    safe_filename = Path(filename).name
+    if not safe_filename:
+        safe_filename = "attachment"
+
+    # Handle duplicates
+    target_path = ATTACHMENT_DOWNLOAD_DIR / safe_filename
+    counter = 1
+    while target_path.exists():
+        stem = Path(safe_filename).stem
+        suffix = Path(safe_filename).suffix
+        target_path = ATTACHMENT_DOWNLOAD_DIR / f"{stem}_{counter}{suffix}"
+        counter += 1
+
+    # Write file
+    target_path.write_bytes(content_bytes)
+    return str(target_path.absolute())

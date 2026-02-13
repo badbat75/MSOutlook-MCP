@@ -94,11 +94,18 @@ pip install -r requirements.txt
 
 **Important:** The virtual environment must be activated before running any scripts or installing dependencies.
 
-### Required Environment Variables
+### Environment Variables
+
+**Required:**
 ```bash
 OUTLOOK_CLIENT_ID      # Azure AD App client ID
 OUTLOOK_CLIENT_SECRET  # Azure AD App client secret
 OUTLOOK_TENANT_ID      # Azure AD tenant ID or "common"
+```
+
+**Optional:**
+```bash
+OUTLOOK_DOWNLOAD_PATH  # Custom path for email attachments (default: ~/Downloads/outlook_attachments)
 ```
 
 **Setting Environment Variables (recommended approach):**
@@ -250,9 +257,11 @@ claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server
 
 ### MCP Tool Categories
 
-**Email Tools (8):**
+**Email Tools (10):**
 - `outlook_list_mail` - OData filtering, full-text search, pagination ($top, $skip)
 - `outlook_get_mail` - Full message details including body HTML and attachments metadata
+- `outlook_list_attachments` - List attachment metadata (name, size, type, ID)
+- `outlook_get_attachment` - Download attachment to configured path (default: ~/Downloads/outlook_attachments/) and return file path (all attachments saved to disk - base64 streaming too heavy for MCP; path configurable via OUTLOOK_DOWNLOAD_PATH env var)
 - `outlook_send_mail` - HTML body support, CC/BCC, importance levels
 - `outlook_create_draft` - Create draft without sending
 - `outlook_reply_mail` - Reply or reply-all with comment

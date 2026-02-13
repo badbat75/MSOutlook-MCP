@@ -5,6 +5,7 @@ Provides 16 MCP tools for Outlook email and calendar operations
 via Microsoft Graph API.
 """
 
+import base64
 import json
 import os
 import sys
@@ -21,10 +22,13 @@ from .models import (
     ReplyMailInput, MoveMailInput, UpdateMailInput, ListMailFoldersInput,
     ListEventsInput, GetEventInput, CreateEventInput, UpdateEventInput,
     DeleteEventInput, RespondEventInput, ListCalendarsInput,
+    ListAttachmentsInput, GetAttachmentInput,
 )
 from .helpers import (
     make_recipients, format_email_summary, format_event_summary,
     format_graph_datetime, handle_graph_error, get_day_of_week,
+    format_attachment_summary, should_save_to_disk, create_data_url,
+    save_attachment_to_disk,
 )
 
 
@@ -436,6 +440,195 @@ async def outlook_list_folders(params: ListMailFoldersInput, ctx: Context = None
                 f"{f.get('totalItemCount', 0)} items | ID: `{f['id']}`\n"
             )
         return result
+    except Exception as e:
+        return handle_graph_error(e)
+
+
+@mcp.tool(
+    name="outlook_list_attachments",
+    annotations={
+        "title": "List Email Attachments",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def outlook_list_attachments(params: ListAttachmentsInput, ctx: Context = None) -> str:
+    """List all attachments for a specific email message.
+
+    Returns metadata for each attachment including name, type, size, and ID.
+    Use the attachment ID with outlook_get_attachment to download.
+
+    Args:
+        params: Message ID to retrieve attachments from
+
+    Returns:
+        str: Formatted list of attachment metadata
+    """
+    try:
+        graph = _get_graph(ctx)
+        endpoint = f"/me/messages/{params.message_id}/attachments"
+
+        # Get all attachments (Graph API auto-paginates for small result sets)
+        # Note: @odata.type is automatically included by Graph API, don't specify in $select
+        data = await graph.get(endpoint, params={
+            "$select": "id,name,contentType,size,isInline,lastModifiedDateTime"
+        })
+
+        attachments = data.get("value", [])
+
+        if not attachments:
+            return f"No attachments found for message `{params.message_id}`"
+
+        result = f"📎 **Attachments** ({len(attachments)} total)\n\n"
+
+        for att in attachments:
+            result += format_attachment_summary(att) + "\n\n---\n\n"
+
+        # Hint for next steps
+        result += "\n*Use `outlook_get_attachment` with message_id + attachment_id to download.*"
+
+        return result
+
+    except Exception as e:
+        return handle_graph_error(e)
+
+
+@mcp.tool(
+    name="outlook_get_attachment",
+    annotations={
+        "title": "Download Email Attachment",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def outlook_get_attachment(params: GetAttachmentInput, ctx: Context = None) -> str:
+    """Download a specific attachment from an email.
+
+    Handles three types of Graph API attachments:
+    - fileAttachment: Regular files (most common) → saved to configured download path
+    - itemAttachment: Embedded emails or calendar items → metadata only
+    - referenceAttachment: Cloud file links (OneDrive, SharePoint) → URL provided
+
+    All file attachments are saved to disk (base64 streaming is too heavy for MCP).
+    Download path can be customized via OUTLOOK_DOWNLOAD_PATH env var
+    (default: ~/Downloads/outlook_attachments/).
+
+    Args:
+        params: Message ID and attachment ID
+
+    Returns:
+        str: File path (for fileAttachment) or metadata (for other types)
+    """
+    try:
+        graph = _get_graph(ctx)
+        endpoint = f"/me/messages/{params.message_id}/attachments/{params.attachment_id}"
+
+        # Get attachment metadata and content
+        data = await graph.get(endpoint)
+
+        att_type = data.get("@odata.type", "")
+        name = data.get("name", "attachment")
+        content_type = data.get("contentType", "application/octet-stream")
+        size_bytes = data.get("size", 0)
+
+        result = f"# Attachment: {name}\n\n"
+        result += f"**Type:** {att_type}\n"
+        result += f"**Content-Type:** {content_type}\n"
+        result += f"**Size:** {size_bytes:,} bytes ({size_bytes / 1024 / 1024:.2f} MB)\n\n"
+
+        # Handle different attachment types
+        if att_type == "#microsoft.graph.fileAttachment":
+            # Regular file attachment
+            content_bytes_b64 = data.get("contentBytes")
+            if not content_bytes_b64:
+                return result + "Error: No content available for this file attachment."
+
+            # Decode base64
+            try:
+                content_bytes = base64.b64decode(content_bytes_b64)
+            except Exception as e:
+                return result + f"Error decoding base64 content: {e}"
+
+            # Decide: disk or inline?
+            if should_save_to_disk(content_type, size_bytes, params.save_to_disk):
+                # Save to disk
+                try:
+                    file_path = save_attachment_to_disk(name, content_bytes)
+                    result += f"✅ **Saved to disk:**\n`{file_path}`\n\n"
+                    result += "*File is ready to access on your local system.*"
+                    return result
+                except Exception as e:
+                    return result + f"Error saving to disk: {e}"
+            else:
+                # Return as base64 data URL
+                data_url = create_data_url(content_type, content_bytes_b64)
+
+                # For images, Claude can render them directly
+                if content_type in {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/bmp", "image/webp"}:
+                    result += "✅ **Image ready for viewing:**\n\n"
+                    result += f"![{name}]({data_url})\n\n"
+                    result += f"*Data URL: `{data_url[:80]}...` ({len(data_url)} chars)*"
+                else:
+                    # For PDFs and text files, provide data URL
+                    result += f"✅ **Content available as base64 data URL:**\n\n"
+                    result += f"```\n{data_url[:200]}...\n```\n\n"
+                    result += f"*Full data URL length: {len(data_url)} characters*\n"
+                    result += "*You can analyze this content or ask to save it to disk.*"
+
+                return result
+
+        elif att_type == "#microsoft.graph.itemAttachment":
+            # Embedded email or calendar item
+            item = data.get("item", {})
+            item_type = item.get("@odata.type", "unknown")
+            result += f"**Item Type:** {item_type}\n\n"
+
+            if "#microsoft.graph.message" in item_type:
+                # Embedded email
+                result += "**This is an embedded email message:**\n\n"
+                from_addr = item.get("from", {}).get("emailAddress", {}).get("address", "N/A")
+                result += f"- Subject: {item.get('subject', 'N/A')}\n"
+                result += f"- From: {from_addr}\n"
+                result += f"- Received: {item.get('receivedDateTime', 'N/A')}\n\n"
+                result += "*Item attachments cannot be downloaded as files. Use the metadata above.*"
+            elif "#microsoft.graph.event" in item_type:
+                # Embedded calendar event
+                result += "**This is an embedded calendar event:**\n\n"
+                result += f"- Subject: {item.get('subject', 'N/A')}\n"
+                start_dt = item.get("start", {}).get("dateTime", "N/A")
+                end_dt = item.get("end", {}).get("dateTime", "N/A")
+                result += f"- Start: {start_dt}\n"
+                result += f"- End: {end_dt}\n\n"
+                result += "*Item attachments cannot be downloaded as files. Use the metadata above.*"
+            else:
+                result += "*Unknown item attachment type. Metadata only.*"
+
+            return result
+
+        elif att_type == "#microsoft.graph.referenceAttachment":
+            # Cloud file reference (OneDrive, SharePoint)
+            result += "**This is a cloud file reference (link):**\n\n"
+
+            source_url = data.get("sourceUrl")
+            permission_type = data.get("permission", "unknown")
+
+            if source_url:
+                result += f"**URL:** {source_url}\n"
+            result += f"**Permission:** {permission_type}\n\n"
+            result += "*Reference attachments are links to cloud files. Open the URL to access.*"
+
+            return result
+
+        else:
+            # Unknown type
+            result += "**Unknown attachment type.**\n"
+            result += f"Raw data:\n```json\n{json.dumps(data, indent=2)[:500]}\n```"
+            return result
+
     except Exception as e:
         return handle_graph_error(e)
 

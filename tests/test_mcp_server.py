@@ -245,6 +245,8 @@ def test_tools_list(client):
         "outlook_get_profile",
         "outlook_list_mail",
         "outlook_list_folders",
+        "outlook_list_attachments",
+        "outlook_get_attachment",
         "outlook_list_events",
         "outlook_list_calendars",
         "outlook_send_mail",
@@ -327,6 +329,69 @@ def test_list_calendars(client):
     return _assert_tool_success(resp, "outlook_list_calendars")
 
 
+def test_list_attachments(client):
+    """Call outlook_list_attachments on the most recent inbox message."""
+    # First get a message ID
+    resp = client.send("tools/call", {
+        "name": "outlook_list_mail",
+        "arguments": {"params": {"folder": "inbox", "top": 1}},
+    })
+    mail_text = _assert_tool_success(resp, "outlook_list_mail")
+
+    # Extract message ID from response (format: ID: `xxx`)
+    import re
+    match = re.search(r"ID: `([^`]+)`", mail_text)
+    if not match:
+        return "SKIP - No message ID found in inbox"
+
+    message_id = match.group(1)
+
+    # Now list attachments
+    resp = client.send("tools/call", {
+        "name": "outlook_list_attachments",
+        "arguments": {"params": {"message_id": message_id}},
+    })
+    return _assert_tool_success(resp, "outlook_list_attachments")
+
+
+def test_get_attachment(client):
+    """Call outlook_get_attachment on first attachment found."""
+    # Get a message with attachments
+    resp = client.send("tools/call", {
+        "name": "outlook_list_mail",
+        "arguments": {"params": {"folder": "inbox", "top": 5, "filter": "hasAttachments eq true"}},
+    })
+    mail_text = _assert_tool_success(resp, "outlook_list_mail")
+
+    import re
+    match = re.search(r"ID: `([^`]+)`", mail_text)
+    if not match:
+        return "SKIP - No messages with attachments found"
+
+    message_id = match.group(1)
+
+    # List attachments to get attachment ID
+    resp = client.send("tools/call", {
+        "name": "outlook_list_attachments",
+        "arguments": {"params": {"message_id": message_id}},
+    })
+    att_text = _assert_tool_success(resp, "outlook_list_attachments")
+
+    # Extract first attachment ID
+    match = re.search(r"ID: `([^`]+)`", att_text)
+    if not match:
+        return "SKIP - No attachment ID found"
+
+    attachment_id = match.group(1)
+
+    # Download attachment
+    resp = client.send("tools/call", {
+        "name": "outlook_get_attachment",
+        "arguments": {"params": {"message_id": message_id, "attachment_id": attachment_id}},
+    })
+    return _assert_tool_success(resp, "outlook_get_attachment")
+
+
 # =============================================================================
 # Runner
 # =============================================================================
@@ -343,6 +408,8 @@ ALL_TESTS = QUICK_TESTS + [
     ("List Mail (unread)", test_list_mail_unread),
     ("List Calendars", test_list_calendars),
     ("List Events (today)", test_list_events),
+    ("List Attachments", test_list_attachments),
+    ("Get Attachment", test_get_attachment),
 ]
 
 

@@ -34,6 +34,7 @@ Copy-Item .env.example .env
 #    OUTLOOK_CLIENT_ID=your-actual-client-id
 #    OUTLOOK_CLIENT_SECRET=your-actual-client-secret
 #    OUTLOOK_TENANT_ID=your-actual-tenant-id
+#    OUTLOOK_DOWNLOAD_PATH=C:\Path\To\Downloads  # Optional: custom attachment download path
 
 # 3. Load the environment
 . .\scripts\setup-env.ps1
@@ -48,6 +49,7 @@ cp .env.example .env
 #    OUTLOOK_CLIENT_ID=your-actual-client-id
 #    OUTLOOK_CLIENT_SECRET=your-actual-client-secret
 #    OUTLOOK_TENANT_ID=your-actual-tenant-id
+#    OUTLOOK_DOWNLOAD_PATH=/path/to/downloads  # Optional: custom attachment download path
 
 # 3. Load the environment
 source ./scripts/setup-env.sh
@@ -60,6 +62,8 @@ source ./scripts/setup-env.sh
 $env:OUTLOOK_CLIENT_ID = "your-client-id"
 $env:OUTLOOK_CLIENT_SECRET = "your-client-secret"
 $env:OUTLOOK_TENANT_ID = "your-tenant-id"
+# Optional: custom attachment download path
+$env:OUTLOOK_DOWNLOAD_PATH = "C:\Users\YourName\Documents\Outlook_Attachments"
 ```
 
 **macOS/Linux:**
@@ -67,6 +71,8 @@ $env:OUTLOOK_TENANT_ID = "your-tenant-id"
 export OUTLOOK_CLIENT_ID="your-client-id"
 export OUTLOOK_CLIENT_SECRET="your-client-secret"
 export OUTLOOK_TENANT_ID="your-tenant-id"
+# Optional: custom attachment download path
+export OUTLOOK_DOWNLOAD_PATH="$HOME/Documents/outlook_attachments"
 ```
 
 ### 3. Authorize the Application
