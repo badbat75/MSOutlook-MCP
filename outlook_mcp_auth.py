@@ -2,11 +2,17 @@
 Outlook MCP - OAuth2 Authentication Setup
 ==========================================
 Run this script once to authorize the MCP server to access your Outlook account.
-It will open a browser for Microsoft login and store the tokens locally.
 
-Usage:
-    python outlook_mcp_auth.py                # Normal mode (opens browser)
-    python outlook_mcp_auth.py --no-browser   # Headless mode (no browser)
+Three authorization modes:
+
+1. Normal mode (default) - Opens browser, waits for callback, allows Ctrl+C fallback
+   python outlook_mcp_auth.py
+
+2. Headless mode - For remote/SSH systems, prompts for manual URL input
+   python outlook_mcp_auth.py --no-browser
+
+3. Direct mode - Provide authorization code or callback URL directly
+   python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 
 Environment variables required:
     OUTLOOK_CLIENT_ID      - Azure AD App client ID

@@ -137,11 +137,35 @@ export OUTLOOK_TENANT_ID="your-tenant-id"   # or "common"
 
 ### 4. Authorize (First Time)
 
+The authorization script supports three modes:
+
+**Normal mode** (opens browser automatically):
 ```bash
 python outlook_mcp_auth.py
 ```
 
-This will open your browser for Microsoft login. After authorization, tokens are saved to `~/.outlook_mcp_token_cache.json`.
+**Headless mode** (for remote/SSH systems without GUI):
+```bash
+python outlook_mcp_auth.py --no-browser
+```
+
+**Direct mode** (provide authorization code directly):
+```bash
+python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
+```
+
+**Normal Mode Workflow:**
+- Opens your browser for Microsoft login
+- Waits for callback on `http://localhost:5000`
+- **TIP:** If callback doesn't work, press Ctrl+C and paste the URL manually
+
+**Headless Mode Workflow:**
+- Displays authorization URL to copy
+- Paste URL in browser on ANY device (phone, laptop, etc.)
+- Copy the callback URL from browser address bar
+- Paste it back in the terminal prompt
+
+After authorization, tokens are saved to `~/.outlook_mcp_token_cache.json`.
 
 ### 5. Start the Server
 
@@ -257,3 +281,5 @@ python tests/test_mcp_server.py --verbose # Show full responses
 | `Token expired` | Refresh is automatic; if it persists, re-run auth |
 | `Rate limited (429)` | Wait the indicated time and retry |
 | `ModuleNotFoundError` | Activate venv: `venv\Scripts\activate` |
+| Browser callback doesn't work | Press Ctrl+C and paste callback URL manually |
+| Remote/SSH system without GUI | Use `python outlook_mcp_auth.py --no-browser` |

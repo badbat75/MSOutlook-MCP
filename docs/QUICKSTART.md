@@ -71,14 +71,38 @@ export OUTLOOK_TENANT_ID="your-tenant-id"
 
 ### 3. Authorize the Application
 
+The authorization script supports three modes:
+
+**Normal mode** (opens browser automatically):
 ```powershell
 python outlook_mcp_auth.py
 ```
 
-This will:
-- Open your browser for Microsoft login
-- Redirect to a local callback server
-- Save OAuth tokens to `~/.outlook_mcp_token_cache.json`
+**Headless mode** (for remote/SSH systems without GUI):
+```powershell
+python outlook_mcp_auth.py --no-browser
+```
+
+**Direct mode** (provide authorization code directly):
+```powershell
+python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
+```
+
+**How it works:**
+
+**Normal Mode:**
+- Opens your browser for Microsoft login
+- Waits for callback on `http://localhost:5000`
+- **TIP:** If callback doesn't work, press Ctrl+C and paste the callback URL manually
+- Saves OAuth tokens to `~/.outlook_mcp_token_cache.json`
+
+**Headless Mode:**
+- Displays authorization URL to copy
+- Open URL in browser on ANY device (phone, laptop, etc.)
+- Sign in with your Microsoft account
+- Copy the callback URL from browser address bar (starts with `http://localhost:5000/callback?code=...`)
+- Paste it back in the terminal prompt
+- Saves OAuth tokens to `~/.outlook_mcp_token_cache.json`
 
 ### 4. Start the Server
 
@@ -166,6 +190,8 @@ Ask Claude to:
 | `403 Forbidden` | Check API permissions in Azure AD |
 | `ModuleNotFoundError` | Activate venv: `venv\Scripts\activate` (Windows) or `source venv/bin/activate` (macOS/Linux) |
 | Environment variables not set | Run `. .\scripts\setup-env.ps1` (Windows) or `source ./scripts/setup-env.sh` (macOS/Linux) |
+| Browser callback doesn't work | Press Ctrl+C and paste callback URL manually |
+| Remote/SSH system without GUI | Use `python outlook_mcp_auth.py --no-browser` |
 
 ## Next Steps
 

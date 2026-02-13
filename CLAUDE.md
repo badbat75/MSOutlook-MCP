@@ -46,9 +46,23 @@ The project uses a **two-script approach** for OAuth2:
 
 1. **Initial Setup** (`outlook_mcp_auth.py`):
    - Run once to authorize the app
-   - Opens browser for Microsoft login
-   - Captures OAuth callback via local HTTP server on port 5000
+   - Supports three authorization modes:
+     - **Normal mode** (default): Opens browser, waits for callback on port 5000, allows Ctrl+C to paste URL manually
+     - **Headless mode** (`--no-browser`): Skips browser/callback, prompts immediately for manual URL input
+     - **Direct mode** (`--code <url>`): Accepts pre-obtained authorization code or callback URL
    - Saves tokens to `~/.outlook_mcp_token_cache.json`
+
+   **Usage examples:**
+   ```bash
+   # Normal mode - Opens browser automatically
+   python outlook_mcp_auth.py
+
+   # Headless mode - For remote/SSH systems
+   python outlook_mcp_auth.py --no-browser
+
+   # Direct mode - Provide auth code directly
+   python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
+   ```
 
 2. **Server Runtime** (`outlook_mcp_server.py` → `outlook_mcp/server.py`):
    - Loads cached tokens on startup via `AuthManager` in `outlook_mcp/auth.py`
@@ -155,7 +169,8 @@ Redirect URI must be: `http://localhost:5000/callback`
 # macOS/Linux: source venv/bin/activate
 
 # Initial auth (first time only)
-python outlook_mcp_auth.py
+python outlook_mcp_auth.py                # Normal mode (opens browser)
+python outlook_mcp_auth.py --no-browser   # Headless mode (for remote systems)
 
 # Run in stdio mode (default, for Claude Desktop)
 python outlook_mcp_server.py

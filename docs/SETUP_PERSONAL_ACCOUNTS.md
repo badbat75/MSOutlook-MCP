@@ -119,8 +119,16 @@ OUTLOOK_TENANT_ID=common
 #   OUTLOOK_CLIENT_SECRET = *** (hidden)
 #   OUTLOOK_TENANT_ID     = common
 
-# Run authorization
+# Run authorization (choose one mode)
+
+# Normal mode - Opens browser automatically
 python outlook_mcp_auth.py
+
+# Headless mode - For remote/SSH systems
+python outlook_mcp_auth.py --no-browser
+
+# Direct mode - Provide auth code directly
+python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 ```
 
 **macOS/Linux:**
@@ -142,11 +150,21 @@ source ./scripts/setup-env.sh
 #   OUTLOOK_CLIENT_SECRET = *** (hidden)
 #   OUTLOOK_TENANT_ID     = common
 
-# Run authorization
+# Run authorization (choose one mode)
+
+# Normal mode - Opens browser automatically
 python outlook_mcp_auth.py
+
+# Headless mode - For remote/SSH systems
+python outlook_mcp_auth.py --no-browser
+
+# Direct mode - Provide auth code directly
+python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 ```
 
 ### 7. Sign In with Your Personal Account
+
+**Normal Mode Workflow:**
 
 The authorization script will:
 
@@ -161,6 +179,21 @@ The authorization script will:
 5. Ask you to consent to these permissions
 6. Redirect to `http://localhost:5000/callback`
 7. Save the OAuth tokens to `~/.outlook_mcp_token_cache.json`
+
+**💡 TIP:** If the callback doesn't work (firewall, network issues), press **Ctrl+C** and paste the callback URL manually from your browser's address bar.
+
+**Headless Mode Workflow (for remote/SSH systems):**
+
+The script will:
+
+1. Display an authorization URL
+2. Prompt you to copy this URL and open it on ANY device (phone, laptop, etc.)
+3. After signing in, the browser redirects to `http://localhost:5000/callback?code=...`
+4. Copy this FULL URL from the browser address bar
+5. Paste it into the terminal prompt
+6. Save the OAuth tokens to `~/.outlook_mcp_token_cache.json`
+
+**Success Message:**
 
 You should see:
 
@@ -189,6 +222,59 @@ INFO:outlook_mcp:Loaded cached tokens
 Press `Ctrl+C` to stop the server when testing is complete.
 
 ## Troubleshooting
+
+### Error: "Cannot open browser on remote/SSH system"
+
+**Cause:** You're on a headless server or remote SSH session without GUI.
+
+**Solution:**
+
+Use headless mode:
+
+**Windows:**
+```powershell
+. .\scripts\setup-env.ps1
+python outlook_mcp_auth.py --no-browser
+```
+
+**macOS/Linux:**
+```bash
+source ./scripts/setup-env.sh
+python outlook_mcp_auth.py --no-browser
+```
+
+**Steps:**
+1. Script displays authorization URL
+2. Copy URL and open on ANY device with a browser (phone, laptop, etc.)
+3. Sign in with your Microsoft account
+4. After sign-in, browser redirects to `http://localhost:5000/callback?code=...`
+5. Copy the FULL URL from browser address bar
+6. Paste it into the terminal prompt
+7. Script completes authorization and saves tokens
+
+**Alternative:** If callback doesn't work in normal mode, press Ctrl+C when prompted and paste the URL manually.
+
+---
+
+### Error: "Browser opens but callback never arrives"
+
+**Cause:** Firewall, network issues, or browser security settings blocking `localhost:5000` callback.
+
+**Solution:**
+
+Don't restart! Just press **Ctrl+C** in the running auth script and paste the URL manually:
+
+1. Script is waiting: `Waiting for authorization callback on http://localhost:5000 ...`
+2. Press **Ctrl+C**
+3. Script prompts: `Paste Callback URL:`
+4. Look at your browser address bar after signing in - it should show `http://localhost:5000/callback?code=...`
+5. Copy the FULL URL from the address bar
+6. Paste it into the terminal
+7. Script completes authorization
+
+**💡 TIP:** The script shows this hint while waiting: "If the callback doesn't work, press Ctrl+C to paste manually"
+
+---
 
 ### Error: "invalid_request - not valid for the application's 'userAudience' configuration" ⚠️ MOST COMMON
 
