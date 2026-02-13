@@ -180,10 +180,10 @@ def main():
         print("  1. Copy the URL above")
         print("  2. Open it in a browser on any device (phone, laptop, etc.)")
         print("  3. Sign in with your Microsoft account")
-        print("  4. The browser will redirect to localhost:5000/callback")
-        print("  5. If on a different device, copy the FULL redirect URL")
-        print("     (including http://localhost:5000/callback?code=...)")
-        print("  6. The script will wait for the callback here...")
+        print("  4. After sign-in, browser will redirect to localhost:5000/callback")
+        print("  5. Copy the FULL redirect URL from your browser address bar")
+        print("     (It will look like: http://localhost:5000/callback?code=...)")
+        print("  6. Paste it below when prompted")
         print()
     else:
         print("Opening browser for Microsoft login...")
@@ -193,7 +193,7 @@ def main():
 
     # Get authorization code
     if args.code:
-        # Manual mode: user provides code or full URL
+        # Manual mode: user provides code or full URL via command line
         print()
         print("Using manually provided authorization code/URL...")
 
@@ -205,12 +205,33 @@ def main():
         else:
             # Just the code provided
             auth_response = {"code": args.code}
+
+    elif args.no_browser:
+        # Headless mode: skip callback server, go straight to manual input
+        print("=" * 60)
+        print("Paste Callback URL")
+        print("=" * 60)
+        print()
+        callback_url = input("Callback URL: ").strip()
+
+        if callback_url:
+            # Parse the pasted URL
+            if callback_url.startswith("http"):
+                parsed = urlparse(callback_url)
+                auth_response = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            else:
+                # Assume it's just the code
+                auth_response = {"code": callback_url}
+        else:
+            print()
+            print("❌ No URL provided. Exiting.")
+            sys.exit(1)
+
     else:
-        # Callback server mode with manual fallback
+        # Normal mode: callback server with Ctrl+C fallback
         print("Waiting for authorization callback on http://localhost:5000 ...")
         print()
-        print("💡 TIP: If the callback doesn't work (remote device), press Ctrl+C")
-        print("   and you'll be prompted to paste the callback URL manually.")
+        print("💡 TIP: If the callback doesn't work, press Ctrl+C to paste manually")
         print()
 
         server = HTTPServer(("localhost", 5000), CallbackHandler)
