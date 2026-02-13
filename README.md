@@ -45,8 +45,10 @@ OutlookMCP/
 │   ├── helpers.py              # Formatting and error handling
 │   └── server.py               # MCP tool definitions + lifecycle
 ├── scripts/
-│   ├── setup-env.ps1           # Load .env + activate venv
-│   └── generate-claude-config.ps1  # Generate Claude Desktop config
+│   ├── setup-env.ps1           # Load .env + activate venv (Windows)
+│   ├── setup-env.sh            # Load .env + activate venv (macOS/Linux)
+│   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
+│   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
 │   └── test_mcp_server.py      # Integration tests via JSON-RPC
 ├── docs/
@@ -95,6 +97,7 @@ pip install -r requirements.txt
 
 ### 3. Configure Environment Variables
 
+**Windows (PowerShell):**
 ```powershell
 # 1. Create your config from the template
 Copy-Item .env.example .env
@@ -105,12 +108,31 @@ Copy-Item .env.example .env
 . .\scripts\setup-env.ps1
 ```
 
-Or set them manually:
+**macOS/Linux (Bash):**
+```bash
+# 1. Create your config from the template
+cp .env.example .env
+
+# 2. Edit .env and fill in your credentials
+
+# 3. Load environment and activate venv
+source ./scripts/setup-env.sh
+```
+
+**Or set them manually:**
 
 ```powershell
+# Windows PowerShell
 $env:OUTLOOK_CLIENT_ID = "your-client-id"
 $env:OUTLOOK_CLIENT_SECRET = "your-client-secret"
 $env:OUTLOOK_TENANT_ID = "your-tenant-id"   # or "common"
+```
+
+```bash
+# macOS/Linux Bash
+export OUTLOOK_CLIENT_ID="your-client-id"
+export OUTLOOK_CLIENT_SECRET="your-client-secret"
+export OUTLOOK_TENANT_ID="your-tenant-id"   # or "common"
 ```
 
 ### 4. Authorize (First Time)
@@ -160,8 +182,14 @@ Add to your Claude Desktop config file (`claude_desktop_config.json`):
 
 Or use the config generator:
 
+**Windows:**
 ```powershell
 .\scripts\generate-claude-config.ps1 -Install
+```
+
+**macOS/Linux:**
+```bash
+./scripts/generate-claude-config.sh --install
 ```
 
 ---
@@ -195,11 +223,20 @@ Once configured, you can ask Claude:
 
 ## Testing
 
+**Windows:**
 ```powershell
 . .\scripts\setup-env.ps1
 python tests\test_mcp_server.py           # Full test suite
 python tests\test_mcp_server.py --quick   # Handshake + profile only
 python tests\test_mcp_server.py --verbose # Show full responses
+```
+
+**macOS/Linux:**
+```bash
+source ./scripts/setup-env.sh
+python tests/test_mcp_server.py           # Full test suite
+python tests/test_mcp_server.py --quick   # Handshake + profile only
+python tests/test_mcp_server.py --verbose # Show full responses
 ```
 
 ---

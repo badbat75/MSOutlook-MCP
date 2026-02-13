@@ -100,14 +100,38 @@ OUTLOOK_TENANT_ID=common
 
 ### 6. Load Environment and Authorize
 
+**Windows:**
 ```powershell
 # Load environment variables and activate venv
 . .\scripts\setup-env.ps1
 
 # You should see:
-# ===========================================================
+# ================================================================
 # Outlook MCP - Environment Setup
-# ===========================================================
+# ================================================================
+#
+# Loading configuration from .env...
+# Activating virtual environment...
+# Virtual environment activated (venv)
+#
+# Environment configured:
+#   OUTLOOK_CLIENT_ID     = 12345678...
+#   OUTLOOK_CLIENT_SECRET = *** (hidden)
+#   OUTLOOK_TENANT_ID     = common
+
+# Run authorization
+python outlook_mcp_auth.py
+```
+
+**macOS/Linux:**
+```bash
+# Load environment variables and activate venv
+source ./scripts/setup-env.sh
+
+# You should see:
+# ================================================================
+# Outlook MCP - Environment Setup
+# ================================================================
 #
 # Loading configuration from .env...
 # Activating virtual environment...
@@ -188,7 +212,9 @@ with 'All' to use /common/ endpoint.
 3. Under **Supported account types**, change to:
    - ✅ **"Accounts in any organizational directory and personal Microsoft accounts"**
 4. Click **Save**
-5. Run: `. .\scripts\setup-env.ps1` then `python outlook_mcp_auth.py`
+5. Run the setup script then re-authorize:
+   - **Windows:** `. .\scripts\setup-env.ps1` then `python outlook_mcp_auth.py`
+   - **macOS/Linux:** `source ./scripts/setup-env.sh` then `python outlook_mcp_auth.py`
 
 **Solution - Option 2: Create New App**
 
@@ -196,7 +222,9 @@ with 'All' to use /common/ endpoint.
 2. Follow the setup guide from Step 1, making sure to select:
    - ✅ "Accounts in any organizational directory and personal Microsoft accounts"
 3. Update your `.env` file with the new Client ID and Secret
-4. Run: `. .\scripts\setup-env.ps1` then `python outlook_mcp_auth.py`
+4. Run the setup script then re-authorize:
+   - **Windows:** `. .\scripts\setup-env.ps1` then `python outlook_mcp_auth.py`
+   - **macOS/Linux:** `source ./scripts/setup-env.sh` then `python outlook_mcp_auth.py`
 
 ---
 
@@ -210,7 +238,9 @@ with 'All' to use /common/ endpoint.
 OUTLOOK_TENANT_ID=common
 ```
 
-Then reload: `. .\scripts\setup-env.ps1` and re-run: `python outlook_mcp_auth.py`
+Then reload and re-run:
+- **Windows:** `. .\scripts\setup-env.ps1` and `python outlook_mcp_auth.py`
+- **macOS/Linux:** `source ./scripts/setup-env.sh` and `python outlook_mcp_auth.py`
 
 ### Error: "AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'"
 
@@ -221,7 +251,9 @@ Then reload: `. .\scripts\setup-env.ps1` and re-run: `python outlook_mcp_auth.py
 2. Create a new client secret (the old one may have expired)
 3. Copy the **Value** (not Secret ID)
 4. Update `OUTLOOK_CLIENT_SECRET` in `.env`
-5. Reload: `. .\scripts\setup-env.ps1`
+5. Reload:
+   - **Windows:** `. .\scripts\setup-env.ps1`
+   - **macOS/Linux:** `source ./scripts/setup-env.sh`
 
 ### Error: "AADSTS700016: Application with identifier '...' was not found in the directory"
 
@@ -231,7 +263,9 @@ Then reload: `. .\scripts\setup-env.ps1` and re-run: `python outlook_mcp_auth.py
 1. Go to Azure Portal → App registrations → Your app → Overview
 2. Copy the correct **Application (client) ID**
 3. Update `OUTLOOK_CLIENT_ID` in `.env`
-4. Reload: `. .\scripts\setup-env.ps1`
+4. Reload:
+   - **Windows:** `. .\scripts\setup-env.ps1`
+   - **macOS/Linux:** `source ./scripts/setup-env.sh`
 
 ### Error: "AADSTS50011: The redirect URI '...' specified in the request does not match"
 
@@ -276,7 +310,9 @@ Once setup is complete:
 
 1. **Configure Claude Desktop** - See [QUICKSTART.md](QUICKSTART.md#5-configure-claude-desktop)
 2. **Test with Claude** - Try commands like "Show me my unread emails"
-3. **Daily Usage** - Just run `. .\scripts\setup-env.ps1` to load environment
+3. **Daily Usage** - Just run the setup script to load environment:
+   - **Windows:** `. .\scripts\setup-env.ps1`
+   - **macOS/Linux:** `source ./scripts/setup-env.sh`
 
 ## Reference
 

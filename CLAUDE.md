@@ -23,8 +23,10 @@ OutlookMCP/
 │   ├── helpers.py              # Formatting and error handling utilities
 │   └── server.py               # MCP tool definitions + lifecycle + entry point
 ├── scripts/
-│   ├── setup-env.ps1           # Load .env + activate venv
-│   └── generate-claude-config.ps1  # Generate Claude Desktop config
+│   ├── setup-env.ps1           # Load .env + activate venv (Windows)
+│   ├── setup-env.sh            # Load .env + activate venv (macOS/Linux)
+│   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
+│   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
 │   └── test_mcp_server.py      # Integration tests via JSON-RPC over stdio
 ├── docs/
@@ -87,8 +89,9 @@ OUTLOOK_TENANT_ID      # Azure AD tenant ID or "common"
 
 **Setting Environment Variables (recommended approach):**
 
-Use the provided PowerShell setup script with a `.env` configuration file:
+Use the provided setup script with a `.env` configuration file:
 
+**Windows (PowerShell):**
 ```powershell
 # 1. Copy the example to create your config file
 Copy-Item .env.example .env
@@ -97,6 +100,17 @@ Copy-Item .env.example .env
 
 # 3. Run setup script with dot-sourcing to load variables
 . .\scripts\setup-env.ps1
+```
+
+**macOS/Linux (Bash):**
+```bash
+# 1. Copy the example to create your config file
+cp .env.example .env
+
+# 2. Edit .env and fill in your Azure AD credentials
+
+# 3. Run setup script with source to load variables
+source ./scripts/setup-env.sh
 ```
 
 The setup script will:
@@ -188,8 +202,15 @@ Add to `claude_desktop_config.json` (use the venv Python interpreter):
 ```
 
 Or use the config generator:
+
+**Windows:**
 ```powershell
 .\scripts\generate-claude-config.ps1 -Install
+```
+
+**macOS/Linux:**
+```bash
+./scripts/generate-claude-config.sh --install
 ```
 
 ### Claude Code Integration
@@ -273,7 +294,9 @@ Graph API supports aliases like `inbox`, `sentitems`, `deleteditems`, `archive`,
 ## Development Workflow
 
 ### Testing Changes
-```bash
+
+**Windows:**
+```powershell
 # 0. Load environment
 . .\scripts\setup-env.ps1
 
@@ -286,6 +309,27 @@ python outlook_mcp_auth.py
 python tests\test_mcp_server.py
 python tests\test_mcp_server.py --verbose  # Full response output
 python tests\test_mcp_server.py --quick    # Handshake + profile only
+
+# 4. Test via Claude Desktop (restart Claude Desktop to reload server)
+
+# 5. For HTTP mode testing:
+python outlook_mcp_server.py --http --port 8000
+```
+
+**macOS/Linux:**
+```bash
+# 0. Load environment
+source ./scripts/setup-env.sh
+
+# 1. Make code changes to files in outlook_mcp/ or outlook_mcp_auth.py
+
+# 2. If auth logic changed, re-run auth setup
+python outlook_mcp_auth.py
+
+# 3. Run integration tests
+python tests/test_mcp_server.py
+python tests/test_mcp_server.py --verbose  # Full response output
+python tests/test_mcp_server.py --quick    # Handshake + profile only
 
 # 4. Test via Claude Desktop (restart Claude Desktop to reload server)
 
