@@ -5,7 +5,8 @@ Run this script once to authorize the MCP server to access your Outlook account.
 It will open a browser for Microsoft login and store the tokens locally.
 
 Usage:
-    python outlook_mcp_auth.py
+    python outlook_mcp_auth.py                # Normal mode (opens browser)
+    python outlook_mcp_auth.py --no-browser   # Headless mode (no browser)
 
 Environment variables required:
     OUTLOOK_CLIENT_ID      - Azure AD App client ID
@@ -17,6 +18,7 @@ import os
 import sys
 import json
 import webbrowser
+import argparse
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -85,6 +87,19 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Outlook MCP OAuth2 Setup")
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Don't automatically open browser (for headless/remote systems)",
+    )
+    parser.add_argument(
+        "--code",
+        type=str,
+        help="Manually provide the authorization code or full callback URL",
+    )
+    args = parser.parse_args()
+
     if not CLIENT_ID or not CLIENT_SECRET:
         print("=" * 60)
         print("ERROR: Environment variables not set!")
@@ -153,24 +168,61 @@ def main():
     print("OUTLOOK MCP - OAuth2 Setup")
     print("=" * 60)
     print()
-    print("Opening browser for Microsoft login...")
-    print(f"If browser doesn't open, visit:\n{auth_url}")
-    print()
 
-    webbrowser.open(auth_url)
+    if args.no_browser:
+        print("🔗 MANUAL AUTHORIZATION REQUIRED")
+        print()
+        print("Copy this URL and open it on ANY device with a browser:")
+        print()
+        print(f"  {auth_url}")
+        print()
+        print("Steps:")
+        print("  1. Copy the URL above")
+        print("  2. Open it in a browser on any device (phone, laptop, etc.)")
+        print("  3. Sign in with your Microsoft account")
+        print("  4. The browser will redirect to localhost:5000/callback")
+        print("  5. If on a different device, copy the FULL redirect URL")
+        print("     (including http://localhost:5000/callback?code=...)")
+        print("  6. The script will wait for the callback here...")
+        print()
+    else:
+        print("Opening browser for Microsoft login...")
+        print(f"If browser doesn't open, visit:\n{auth_url}")
+        print()
+        webbrowser.open(auth_url)
 
-    # Start callback server
-    print("Waiting for authorization callback on http://localhost:5000 ...")
-    server = HTTPServer(("localhost", 5000), CallbackHandler)
+    # Get authorization code
+    if args.code:
+        # Manual mode: user provides code or full URL
+        print()
+        print("Using manually provided authorization code/URL...")
 
-    while CallbackHandler.auth_code is None:
-        server.handle_request()
+        # Check if it's a full URL or just a code
+        if args.code.startswith("http"):
+            # Full URL provided
+            parsed = urlparse(args.code)
+            auth_response = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        else:
+            # Just the code provided
+            auth_response = {"code": args.code}
+    else:
+        # Callback server mode
+        print("Waiting for authorization callback on http://localhost:5000 ...")
+        print()
+        print("💡 TIP: If authorizing from a different device, you can also run:")
+        print(f"   python outlook_mcp_auth.py --code '<paste-full-callback-url>'")
+        print()
 
-    server.server_close()
+        server = HTTPServer(("localhost", 5000), CallbackHandler)
 
-    # Complete the flow
-    parsed = urlparse(f"http://localhost:5000{CallbackHandler.full_url}")
-    auth_response = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        while CallbackHandler.auth_code is None:
+            server.handle_request()
+
+        server.server_close()
+
+        # Complete the flow
+        parsed = urlparse(f"http://localhost:5000{CallbackHandler.full_url}")
+        auth_response = {k: v[0] for k, v in parse_qs(parsed.query).items()}
 
     result = app.acquire_token_by_auth_code_flow(flow, auth_response)
 
