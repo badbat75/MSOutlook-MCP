@@ -34,6 +34,9 @@ ENV/
 # This entry is a safety net in case the file is copied locally
 .outlook_mcp_token_cache.json
 
+# Claude Code
+.claude/
+
 # IDEs
 .vscode/
 .idea/
