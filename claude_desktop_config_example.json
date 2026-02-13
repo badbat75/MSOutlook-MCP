@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "MS_Outlook_MCP": {
+      "command": "C:\\path\\to\\OutlookMCP\\venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\OutlookMCP\\outlook_mcp_server.py"],
+      "env": {
+        "OUTLOOK_CLIENT_ID": "YOUR_CLIENT_ID",
+        "OUTLOOK_CLIENT_SECRET": "YOUR_CLIENT_SECRET",
+        "OUTLOOK_TENANT_ID": "YOUR_TENANT_ID"
+      }
+    }
+  }
+}
