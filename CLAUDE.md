@@ -287,7 +287,7 @@ All Graph API calls go through `GraphClient.request()` in `outlook_mcp/auth.py` 
 1. Gets fresh token via `AuthManager.get_token()` (auto-refreshes if needed)
 2. Adds `Authorization: Bearer {token}` header
 3. Raises HTTP errors via `httpx.Response.raise_for_status()`
-4. Returns JSON or `{"status": "success"}` for 204 responses
+4. Returns parsed JSON, or `{"status": "success"}` for empty-body responses (202 Accepted from `sendMail`, 204 No Content from delete/update, or any response with no body)
 
 Error handling wraps Graph exceptions with `handle_graph_error()` in `outlook_mcp/helpers.py` to provide user-friendly messages.
 

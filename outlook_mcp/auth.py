@@ -139,7 +139,9 @@ class GraphClient:
             method, endpoint, headers=headers, **kwargs
         )
         response.raise_for_status()
-        if response.status_code == 204:
+        # Some Graph endpoints return an empty body: sendMail → 202 Accepted,
+        # delete/update → 204 No Content. Don't try to JSON-decode those.
+        if response.status_code in (202, 204) or not response.content:
             return {"status": "success"}
         return response.json()
 
