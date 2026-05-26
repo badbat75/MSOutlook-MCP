@@ -108,13 +108,16 @@ async def outlook_list_mail(params: ListMailInput, ctx: Context = None) -> str:
         query_params = {
             "$top": params.top,
             "$skip": params.skip,
-            "$orderby": "receivedDateTime desc",
             "$select": params.select or "id,subject,from,receivedDateTime,isRead,importance,hasAttachments,bodyPreview",
         }
         if params.filter:
             query_params["$filter"] = params.filter
         if params.search:
+            # Graph forbids combining $search with $orderby (search sorts by
+            # relevance); adding both returns 400. Only sort when not searching.
             query_params["$search"] = f'"{params.search}"'
+        else:
+            query_params["$orderby"] = "receivedDateTime desc"
 
         data = await graph.get(endpoint, params=query_params)
         messages = data.get("value", [])

@@ -138,6 +138,18 @@ class GraphClient:
         response = await client.request(
             method, endpoint, headers=headers, **kwargs
         )
+        if response.status_code >= 400:
+            # Log the outgoing payload and Graph's error body so 4xx/5xx causes
+            # are diagnosable (httpx only logs the request line, not the body).
+            logger.error(
+                "Graph %s %s -> %s | params=%s | body=%s | response=%s",
+                method,
+                endpoint,
+                response.status_code,
+                kwargs.get("params"),
+                kwargs.get("json"),
+                response.text,
+            )
         response.raise_for_status()
         # Some Graph endpoints return an empty body: sendMail → 202 Accepted,
         # delete/update → 204 No Content. Don't try to JSON-decode those.
