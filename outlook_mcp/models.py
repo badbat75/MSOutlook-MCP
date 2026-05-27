@@ -11,7 +11,12 @@ class ListMailInput(BaseModel):
 
     folder: str = Field(
         default="inbox",
-        description="Mail folder: 'inbox', 'sentitems', 'drafts', 'deleteditems', 'junkemail', or folder ID"
+        description=(
+            "Mail folder: 'inbox', 'sentitems', 'drafts', 'deleteditems', 'junkemail', "
+            "a subfolder display name (e.g. 'Centri Estivi'), or a folder ID. "
+            "Use '*' (or 'all') to search/list across the entire mailbox, ignoring folders "
+            "— useful with `search` when you don't know which folder a message is in."
+        )
     )
     top: int = Field(default=10, description="Number of messages to return", ge=1, le=50)
     skip: int = Field(default=0, description="Number of messages to skip (pagination)", ge=0)
@@ -49,6 +54,14 @@ class SendMailInput(BaseModel):
     importance: str = Field(default="normal", description="'low', 'normal', or 'high'")
     is_html: bool = Field(default=True, description="Whether body is HTML (True) or plain text (False)")
     save_to_sent: bool = Field(default=True, description="Save a copy in Sent Items")
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Local file paths to attach. Files up to 3MB are sent inline; larger "
+            "files are uploaded via an upload session. Note: when attachments are "
+            "present, the message is always saved to Sent Items (save_to_sent is ignored)."
+        ),
+    )
 
     @field_validator("importance")
     @classmethod
@@ -69,6 +82,13 @@ class CreateDraftInput(BaseModel):
     bcc: Optional[List[str]] = Field(default=None, description="BCC recipients")
     importance: str = Field(default="normal", description="'low', 'normal', or 'high'")
     is_html: bool = Field(default=True, description="Whether body is HTML (True) or plain text (False)")
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Local file paths to attach. Files up to 3MB are sent inline; larger "
+            "files are uploaded via an upload session."
+        ),
+    )
 
     @field_validator("importance")
     @classmethod
@@ -95,6 +115,20 @@ class MoveMailInput(BaseModel):
     destination_folder: str = Field(
         ...,
         description="Target folder: 'inbox', 'archive', 'deleteditems', 'junkemail', or folder ID"
+    )
+
+
+class DeleteMailInput(BaseModel):
+    """Input for deleting an email or draft."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    message_id: str = Field(..., description="ID of the message (or draft) to delete", min_length=1)
+    permanent: bool = Field(
+        default=False,
+        description=(
+            "If False (default), the message is moved to Deleted Items and can be "
+            "recovered. If True, it is permanently deleted and cannot be recovered."
+        ),
     )
 
 
@@ -213,7 +247,14 @@ class ListMailFoldersInput(BaseModel):
     """Input for listing mail folders."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    top: int = Field(default=20, description="Max folders to return", ge=1, le=50)
+    top: int = Field(default=20, description="Max folders to return per level", ge=1, le=50)
+    include_subfolders: bool = Field(
+        default=True,
+        description=(
+            "Recurse into child folders and show the full nested hierarchy "
+            "(e.g. subfolders under Inbox). Set False for top-level folders only."
+        ),
+    )
 
 
 class ListCalendarsInput(BaseModel):

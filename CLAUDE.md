@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 16 MCP tools.
+Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 17 MCP tools.
 
 **Core Architecture:**
 - **FastMCP framework** for tool registration and server lifecycle
@@ -253,12 +253,12 @@ claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server
 | `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle), `GraphClient` (async HTTP) |
 | `outlook_mcp/models.py` | All Pydantic v2 input models with validation |
 | `outlook_mcp/helpers.py` | `format_email_summary()`, `format_event_summary()`, `handle_graph_error()`, `make_recipients()` |
-| `outlook_mcp/server.py` | FastMCP setup, lifespan context, all 16 `@mcp.tool()` definitions, `main()` entry point |
+| `outlook_mcp/server.py` | FastMCP setup, lifespan context, all 17 `@mcp.tool()` definitions, `main()` entry point |
 
 ### MCP Tool Categories
 
-**Email Tools (10):**
-- `outlook_list_mail` - OData filtering, full-text search, pagination ($top, $skip)
+**Email Tools (11):**
+- `outlook_list_mail` - OData filtering, full-text search, pagination ($top, $skip); `folder="*"` searches across the whole mailbox (all folders), and subfolder display names (e.g. "Centri Estivi") resolve automatically
 - `outlook_get_mail` - Full message details including body HTML and attachments metadata
 - `outlook_list_attachments` - List attachment metadata (name, size, type, ID)
 - `outlook_get_attachment` - Download attachment to configured path (default: ~/Downloads/outlook_attachments/) and return file path (all attachments saved to disk - base64 streaming too heavy for MCP; path configurable via OUTLOOK_DOWNLOAD_PATH env var)
@@ -266,8 +266,9 @@ claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server
 - `outlook_create_draft` - Create draft without sending
 - `outlook_reply_mail` - Reply or reply-all with comment
 - `outlook_move_mail` - Move to folder by name or well-known folder (inbox, archive, deleteditems, etc.)
+- `outlook_delete_mail` - Delete a message or draft; soft-delete to Deleted Items by default, or `permanent=True` to delete irrecoverably
 - `outlook_update_mail` - Mark read/unread, flag, categorize
-- `outlook_list_folders` - Hierarchical folder structure with message counts
+- `outlook_list_folders` - Hierarchical folder structure with message counts; recurses into subfolders (nested, indented) by default, toggle with `include_subfolders`
 
 **Calendar Tools (7):**
 - `outlook_list_events` - Date range filtering, expands recurring series
