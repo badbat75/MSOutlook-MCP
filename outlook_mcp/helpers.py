@@ -9,6 +9,17 @@ from typing import List
 import httpx
 
 
+# Reusable guidance for building a valid OData $filter (shared by the pre-flight
+# validation in server.py and the 400-error handler below).
+FILTER_SYNTAX_HINT = (
+    "Build $filter with comparison operators (eq, ne, gt, ge, lt, le) joined by "
+    "and/or, using ISO-8601 datetimes with a 'Z' suffix. Examples: "
+    "\"isRead eq false\", "
+    "\"receivedDateTime ge 2026-05-26T00:00:00Z and receivedDateTime lt 2026-05-27T00:00:00Z\", "
+    "\"from/emailAddress/address eq 'john@example.com'\"."
+)
+
+
 def make_recipients(addresses: List[str]) -> list:
     """Convert a list of email addresses to Graph API recipient format."""
     return [{"emailAddress": {"address": addr}} for addr in addresses]
@@ -104,6 +115,8 @@ def handle_graph_error(e: Exception) -> str:
         elif status == 429:
             retry_after = e.response.headers.get("Retry-After", "60")
             return f"Error 429: Rate limited. Retry after {retry_after} seconds."
+        elif status == 400 and "filter" in error_msg.lower():
+            return f"Error 400: {error_msg}\n\n{FILTER_SYNTAX_HINT}"
         else:
             return f"Error {status}: {error_msg}"
     elif isinstance(e, httpx.TimeoutException):

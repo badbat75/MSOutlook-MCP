@@ -7,11 +7,15 @@ via Microsoft Graph API.
 
 import base64
 import json
+import mimetypes
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any
+from pathlib import Path
+from typing import Dict, Any, List
 from contextlib import asynccontextmanager
+
+import httpx
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
@@ -19,7 +23,7 @@ from mcp.server.fastmcp.server import Context
 from .auth import AuthManager, GraphClient
 from .models import (
     ListMailInput, GetMailInput, SendMailInput, CreateDraftInput,
-    ReplyMailInput, MoveMailInput, UpdateMailInput, ListMailFoldersInput,
+    ReplyMailInput, MoveMailInput, DeleteMailInput, UpdateMailInput, ListMailFoldersInput,
     ListEventsInput, GetEventInput, CreateEventInput, UpdateEventInput,
     DeleteEventInput, RespondEventInput, ListCalendarsInput,
     ListAttachmentsInput, GetAttachmentInput,
@@ -28,8 +32,9 @@ from .helpers import (
     make_recipients, format_email_summary, format_event_summary,
     format_graph_datetime, handle_graph_error, get_day_of_week,
     format_attachment_summary, should_save_to_disk, create_data_url,
-    save_attachment_to_disk,
+    save_attachment_to_disk, FILTER_SYNTAX_HINT,
 )
+import re
 
 
 # =============================================================================
@@ -66,6 +71,194 @@ def _get_graph(ctx: Context) -> GraphClient:
     return ctx.request_context.lifespan_context["graph"]
 
 
+# Well-known folder aliases Graph accepts directly (no ID lookup needed).
+_WELL_KNOWN_FOLDERS = {
+    "inbox": "inbox",
+    "archive": "archive",
+    "deleteditems": "deletedItems",
+    "trash": "deletedItems",
+    "junkemail": "junkEmail",
+    "junk": "junkEmail",
+    "drafts": "drafts",
+    "sentitems": "sentItems",
+    "sent": "sentItems",
+}
+
+
+async def _find_folder_id_by_name(graph: GraphClient, name: str, parent: str = "/me/mailFolders") -> str:
+    """Depth-first search of the folder tree for a folder matching displayName.
+
+    Returns the folder ID, or None if no match is found. Searches nested
+    child folders too, so subfolders (e.g. a folder inside Inbox) are found.
+    """
+    data = await graph.get(
+        parent,
+        params={"$top": 100, "$select": "id,displayName,childFolderCount"},
+    )
+    folders = data.get("value", [])
+    target = name.strip().lower()
+    for f in folders:
+        if f.get("displayName", "").lower() == target:
+            return f["id"]
+    for f in folders:
+        if f.get("childFolderCount", 0) > 0:
+            found = await _find_folder_id_by_name(
+                graph, name, f"/me/mailFolders/{f['id']}/childFolders"
+            )
+            if found:
+                return found
+    return None
+
+
+async def _resolve_folder(graph: GraphClient, name: str) -> str:
+    """Resolve a folder reference to a value Graph accepts (well-known name or ID).
+
+    Accepts well-known aliases (inbox, archive, ...), a raw folder ID, or a
+    user-facing display name (including nested subfolders). Raises ValueError
+    with a helpful message if a display name cannot be matched.
+    """
+    key = name.strip().lower()
+    if key in _WELL_KNOWN_FOLDERS:
+        return _WELL_KNOWN_FOLDERS[key]
+    # Folder IDs are long opaque strings; short values are treated as names.
+    if len(name) > 60 and " " not in name:
+        return name
+    folder_id = await _find_folder_id_by_name(graph, name)
+    if folder_id:
+        return folder_id
+    raise ValueError(
+        f"Folder '{name}' not found. Use outlook_list_folders to see available "
+        f"folders (names are case-insensitive; subfolders are supported)."
+    )
+
+
+async def _format_folder_tree(
+    graph: GraphClient, parent: str, top: int, recurse: bool, depth: int = 0
+) -> str:
+    """Render mail folders under `parent` as a nested bullet list.
+
+    When `recurse` is True, folders with children are expanded depth-first so
+    subfolders (e.g. a folder under Inbox) appear indented beneath their parent.
+    """
+    data = await graph.get(
+        parent,
+        params={"$top": top, "$select": "id,displayName,totalItemCount,unreadItemCount,childFolderCount"},
+    )
+    folders = data.get("value", [])
+    lines = ""
+    indent = "  " * depth
+    for f in folders:
+        unread = f.get("unreadItemCount", 0)
+        unread_badge = f" (📬 {unread} unread)" if unread > 0 else ""
+        lines += (
+            f"{indent}- **{f['displayName']}**{unread_badge} — "
+            f"{f.get('totalItemCount', 0)} items | ID: `{f['id']}`\n"
+        )
+        if recurse and f.get("childFolderCount", 0) > 0:
+            lines += await _format_folder_tree(
+                graph, f"/me/mailFolders/{f['id']}/childFolders", top, recurse, depth + 1
+            )
+    return lines
+
+
+# Graph accepts attachments up to 3MB inline on a message; larger files must go
+# through an upload session uploaded in chunks (multiples of 320 KB recommended).
+_INLINE_ATTACHMENT_LIMIT = 3 * 1024 * 1024
+_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024
+
+
+def _read_attachment_meta(path: str):
+    """Resolve a local file path to (Path, name, content_type, size)."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise ValueError(f"Attachment file not found: {path}")
+    content_type = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    return p, p.name, content_type, p.stat().st_size
+
+
+async def _attach_small_file(graph: GraphClient, message_id: str, p: Path, name: str, content_type: str) -> None:
+    """Attach a small (<=3MB) file inline via POST .../attachments."""
+    content_b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    await graph.post(
+        f"/me/messages/{message_id}/attachments",
+        json_data={
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": name,
+            "contentType": content_type,
+            "contentBytes": content_b64,
+        },
+    )
+
+
+async def _attach_large_file(graph: GraphClient, message_id: str, p: Path, name: str, content_type: str, size: int) -> None:
+    """Attach a large (>3MB) file via an upload session, uploaded in chunks."""
+    session = await graph.post(
+        f"/me/messages/{message_id}/attachments/createUploadSession",
+        json_data={
+            "AttachmentItem": {
+                "attachmentType": "file",
+                "name": name,
+                "size": size,
+                "contentType": content_type,
+            }
+        },
+    )
+    upload_url = session["uploadUrl"]
+    # The upload URL is pre-authenticated; use a bare client (no Bearer header).
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        with p.open("rb") as fh:
+            start = 0
+            while start < size:
+                chunk = fh.read(_UPLOAD_CHUNK_SIZE)
+                end = start + len(chunk) - 1
+                resp = await client.put(
+                    upload_url,
+                    content=chunk,
+                    headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {start}-{end}/{size}",
+                        "Content-Type": "application/octet-stream",
+                    },
+                )
+                resp.raise_for_status()
+                start = end + 1
+
+
+async def _attach_files(graph: GraphClient, message_id: str, paths: List[str]) -> List[str]:
+    """Attach each local file path to an existing message. Returns attached names."""
+    names: List[str] = []
+    for path in paths:
+        p, name, content_type, size = _read_attachment_meta(path)
+        if size <= _INLINE_ATTACHMENT_LIMIT:
+            await _attach_small_file(graph, message_id, p, name, content_type)
+        else:
+            await _attach_large_file(graph, message_id, p, name, content_type, size)
+        names.append(name)
+    return names
+
+
+# Whole-word OData operators, plus function-style operators like contains(...).
+_ODATA_OPERATORS = re.compile(
+    r"\b(eq|ne|gt|ge|lt|le|and|or|not|in|has)\b"
+    r"|\b(contains|startswith|endswith)\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _validate_odata_filter(filter_str: str) -> None:
+    """Reject an obviously malformed $filter (no operator) before hitting Graph.
+
+    Catches the common mistake of passing a bare value like
+    'receivedDateTime 2026-05-26', returning actionable guidance so the caller
+    can self-correct without a wasted round-trip.
+    """
+    if not _ODATA_OPERATORS.search(filter_str):
+        raise ValueError(
+            f"Invalid $filter '{filter_str}': no comparison operator found. "
+            f"{FILTER_SYNTAX_HINT}"
+        )
+
+
 # =============================================================================
 # EMAIL TOOLS
 # =============================================================================
@@ -91,33 +284,36 @@ async def outlook_list_mail(params: ListMailInput, ctx: Context = None) -> str:
     """
     try:
         graph = _get_graph(ctx)
-        folder_map = {
-            "inbox": "inbox",
-            "sentitems": "sentItems",
-            "sent": "sentItems",
-            "drafts": "drafts",
-            "deleteditems": "deletedItems",
-            "trash": "deletedItems",
-            "junkemail": "junkEmail",
-            "junk": "junkEmail",
-            "archive": "archive",
-        }
-        folder = folder_map.get(params.folder.lower(), params.folder)
-        endpoint = f"/me/mailFolders/{folder}/messages"
+        # '*'/'all' searches the whole mailbox via /me/messages (every folder),
+        # so a message can be found without knowing which folder it lives in.
+        all_folders = params.folder.strip().lower() in ("*", "all")
+        if all_folders:
+            endpoint = "/me/messages"
+            folder_label = "All folders"
+        else:
+            folder = await _resolve_folder(graph, params.folder)
+            endpoint = f"/me/mailFolders/{folder}/messages"
+            folder_label = params.folder.title()
 
         query_params = {
             "$top": params.top,
-            "$skip": params.skip,
             "$select": params.select or "id,subject,from,receivedDateTime,isRead,importance,hasAttachments,bodyPreview",
         }
         if params.filter:
+            _validate_odata_filter(params.filter)
             query_params["$filter"] = params.filter
         if params.search:
-            # Graph forbids combining $search with $orderby (search sorts by
-            # relevance); adding both returns 400. Only sort when not searching.
+            # Graph forbids combining $search with $orderby or $skip: search
+            # sorts by relevance and does not support offset pagination, so
+            # adding either returns 400. Only set them when not searching.
             query_params["$search"] = f'"{params.search}"'
         else:
-            query_params["$orderby"] = "receivedDateTime desc"
+            query_params["$skip"] = params.skip
+            # Graph rejects $orderby combined with an arbitrary $filter as
+            # "The restriction or sort order is too complex for this operation".
+            # Only sort by date when unfiltered; with a filter, use default order.
+            if not params.filter:
+                query_params["$orderby"] = "receivedDateTime desc"
 
         data = await graph.get(endpoint, params=query_params)
         messages = data.get("value", [])
@@ -126,11 +322,15 @@ async def outlook_list_mail(params: ListMailInput, ctx: Context = None) -> str:
             return f"No messages found in '{params.folder}'"
 
         total = data.get("@odata.count", "unknown")
-        result = f"📬 **{params.folder.title()}** — {len(messages)} messages (skip: {params.skip})\n\n"
+        header = f"📬 **{folder_label}** — {len(messages)} messages"
+        if not params.search:
+            header += f" (skip: {params.skip})"
+        result = header + "\n\n"
         for msg in messages:
             result += format_email_summary(msg) + "\n\n---\n\n"
 
-        if data.get("@odata.nextLink"):
+        # $skip-based pagination only applies when not searching (search has no offset).
+        if data.get("@odata.nextLink") and not params.search:
             result += f"\n*More messages available. Use skip={params.skip + params.top} for next page.*"
 
         return result
@@ -224,27 +424,39 @@ async def outlook_send_mail(params: SendMailInput, ctx: Context = None) -> str:
     try:
         graph = _get_graph(ctx)
 
-        payload = {
-            "message": {
-                "subject": params.subject,
-                "body": {
-                    "contentType": "HTML" if params.is_html else "Text",
-                    "content": params.body,
-                },
-                "toRecipients": make_recipients(params.to),
-                "importance": params.importance,
+        message = {
+            "subject": params.subject,
+            "body": {
+                "contentType": "HTML" if params.is_html else "Text",
+                "content": params.body,
             },
-            "saveToSentItems": params.save_to_sent,
+            "toRecipients": make_recipients(params.to),
+            "importance": params.importance,
         }
-
         if params.cc:
-            payload["message"]["ccRecipients"] = make_recipients(params.cc)
+            message["ccRecipients"] = make_recipients(params.cc)
         if params.bcc:
-            payload["message"]["bccRecipients"] = make_recipients(params.bcc)
-
-        await graph.post("/me/sendMail", json_data=payload)
+            message["bccRecipients"] = make_recipients(params.bcc)
 
         recipients = ", ".join(params.to)
+
+        if params.attachments:
+            # sendMail can't carry large attachments in a single request, so build
+            # a draft, attach files (inline or via upload session), then send it.
+            draft = await graph.post("/me/messages", json_data=message)
+            message_id = draft["id"]
+            attached = await _attach_files(graph, message_id, params.attachments)
+            await graph.post(f"/me/messages/{message_id}/send")
+            return (
+                f"✅ Email sent successfully!\n**To:** {recipients}\n"
+                f"**Subject:** {params.subject}\n"
+                f"**Attachments:** {', '.join(attached)}"
+            )
+
+        await graph.post(
+            "/me/sendMail",
+            json_data={"message": message, "saveToSentItems": params.save_to_sent},
+        )
         return f"✅ Email sent successfully!\n**To:** {recipients}\n**Subject:** {params.subject}"
     except Exception as e:
         return handle_graph_error(e)
@@ -291,12 +503,18 @@ async def outlook_create_draft(params: CreateDraftInput, ctx: Context = None) ->
 
         draft_id = result.get("id", "unknown")
         recipients = ", ".join(params.to)
-        return (
+        attached = []
+        if params.attachments:
+            attached = await _attach_files(graph, draft_id, params.attachments)
+        message = (
             f"📝 Draft created successfully!\n"
             f"**To:** {recipients}\n"
             f"**Subject:** {params.subject}\n"
             f"**Draft ID:** `{draft_id}`"
         )
+        if attached:
+            message += f"\n**Attachments:** {', '.join(attached)}"
+        return message
     except Exception as e:
         return handle_graph_error(e)
 
@@ -351,22 +569,43 @@ async def outlook_move_mail(params: MoveMailInput, ctx: Context = None) -> str:
     """
     try:
         graph = _get_graph(ctx)
-        folder_map = {
-            "inbox": "inbox",
-            "archive": "archive",
-            "deleteditems": "deleteditems",
-            "trash": "deleteditems",
-            "junkemail": "junkemail",
-            "junk": "junkemail",
-            "drafts": "drafts",
-            "sentitems": "sentitems",
-        }
-        dest = folder_map.get(params.destination_folder.lower(), params.destination_folder)
+        dest = await _resolve_folder(graph, params.destination_folder)
         data = await graph.post(
             f"/me/messages/{params.message_id}/move",
             json_data={"destinationId": dest},
         )
         return f"✅ Message moved to '{params.destination_folder}'. New ID: `{data.get('id', 'N/A')}`"
+    except Exception as e:
+        return handle_graph_error(e)
+
+
+@mcp.tool(
+    name="outlook_delete_mail",
+    annotations={
+        "title": "Delete Email or Draft",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def outlook_delete_mail(params: DeleteMailInput, ctx: Context = None) -> str:
+    """Delete an email or draft.
+
+    By default this is a soft delete: the message is moved to Deleted Items and
+    can be recovered. Set `permanent=True` to permanently delete it (cannot be
+    recovered). Works for ordinary messages and for drafts.
+
+    Returns:
+        str: Confirmation of the deletion.
+    """
+    try:
+        graph = _get_graph(ctx)
+        if params.permanent:
+            await graph.post(f"/me/messages/{params.message_id}/permanentDelete")
+            return f"🗑️ Message `{params.message_id}` permanently deleted (not recoverable)."
+        await graph.delete(f"/me/messages/{params.message_id}")
+        return f"🗑️ Message `{params.message_id}` moved to Deleted Items."
     except Exception as e:
         return handle_graph_error(e)
 
@@ -426,23 +665,12 @@ async def outlook_list_folders(params: ListMailFoldersInput, ctx: Context = None
     """
     try:
         graph = _get_graph(ctx)
-        data = await graph.get(
-            "/me/mailFolders",
-            params={"$top": params.top, "$select": "id,displayName,totalItemCount,unreadItemCount"},
+        tree = await _format_folder_tree(
+            graph, "/me/mailFolders", params.top, params.include_subfolders
         )
-        folders = data.get("value", [])
-        if not folders:
+        if not tree:
             return "No mail folders found."
-
-        result = "📁 **Mail Folders**\n\n"
-        for f in folders:
-            unread = f.get("unreadItemCount", 0)
-            unread_badge = f" (📬 {unread} unread)" if unread > 0 else ""
-            result += (
-                f"- **{f['displayName']}**{unread_badge} — "
-                f"{f.get('totalItemCount', 0)} items | ID: `{f['id']}`\n"
-            )
-        return result
+        return "📁 **Mail Folders**\n\n" + tree
     except Exception as e:
         return handle_graph_error(e)
 
