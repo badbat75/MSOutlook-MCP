@@ -73,6 +73,9 @@ def format_event_summary(event: dict) -> str:
         f"Location: {location}\n"
         f"Organizer: {organizer_str}\n"
     )
+    calendar_name = event.get("calendarName")
+    if calendar_name:
+        result += f"Calendar: {calendar_name}\n"
     if attendees:
         result += f"Attendees: {attendee_list}\n"
     result += f"ID: `{event.get('id', '')}`"

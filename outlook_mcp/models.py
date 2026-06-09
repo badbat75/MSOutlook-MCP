@@ -160,7 +160,8 @@ class ListEventsInput(BaseModel):
     top: int = Field(default=20, description="Max events to return", ge=1, le=50)
     calendar_id: Optional[str] = Field(
         default=None,
-        description="Specific calendar ID. Omit for default calendar."
+        description="Specific calendar ID. Omit to aggregate events across ALL "
+                    "calendars (e.g. Calendar, Birthdays, Your Family)."
     )
 
 

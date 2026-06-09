@@ -899,28 +899,49 @@ async def outlook_list_events(params: ListEventsInput, ctx: Context = None) -> s
         if "T" not in end:
             end += "T23:59:59"
 
-        base = f"/me/calendars/{params.calendar_id}" if params.calendar_id else "/me"
-        endpoint = f"{base}/calendarView"
+        query = {
+            "startDateTime": start,
+            "endDateTime": end,
+            "$top": params.top,
+            "$orderby": "start/dateTime",
+            "$select": "id,subject,start,end,location,organizer,attendees,isOnlineMeeting,showAs,isCancelled,recurrence",
+        }
 
-        data = await graph.get(
-            endpoint,
-            params={
-                "startDateTime": start,
-                "endDateTime": end,
-                "$top": params.top,
-                "$orderby": "start/dateTime",
-                "$select": "id,subject,start,end,location,organizer,attendees,isOnlineMeeting,showAs,isCancelled,recurrence",
-            },
-        )
-        events = data.get("value", [])
+        if params.calendar_id:
+            # Single calendar: query directly.
+            data = await graph.get(
+                f"/me/calendars/{params.calendar_id}/calendarView", params=query
+            )
+            events = [e for e in data.get("value", []) if not e.get("isCancelled")]
+        else:
+            # No calendar specified: aggregate across ALL calendars (e.g. the
+            # default "Calendar", "Birthdays", "Your Family", etc.). The plain
+            # /me/calendarView endpoint only returns the default calendar.
+            cal_data = await graph.get(
+                "/me/calendars", params={"$select": "id,name", "$top": 50}
+            )
+            calendars = cal_data.get("value", [])
+
+            events = []
+            for cal in calendars:
+                cal_view = await graph.get(
+                    f"/me/calendars/{cal['id']}/calendarView", params=query
+                )
+                for event in cal_view.get("value", []):
+                    if event.get("isCancelled"):
+                        continue
+                    event["calendarName"] = cal.get("name", "")
+                    events.append(event)
+
+            # Merge and sort all calendars by start time, then cap at top.
+            events.sort(key=lambda e: e.get("start", {}).get("dateTime", ""))
+            events = events[: params.top]
 
         if not events:
             return f"No events found between {start[:10]} and {end[:10]}"
 
         result = f"📅 **Calendar Events** ({start[:10]} → {end[:10]})\n\n"
         for event in events:
-            if event.get("isCancelled"):
-                continue
             result += format_event_summary(event) + "\n\n---\n\n"
 
         return result

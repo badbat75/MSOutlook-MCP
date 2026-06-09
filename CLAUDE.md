@@ -271,7 +271,7 @@ claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server
 - `outlook_list_folders` - Hierarchical folder structure with message counts; recurses into subfolders (nested, indented) by default, toggle with `include_subfolders`
 
 **Calendar Tools (7):**
-- `outlook_list_events` - Date range filtering, expands recurring series
+- `outlook_list_events` - Date range filtering, expands recurring series; with no `calendar_id` it aggregates events across ALL calendars (Calendar, Birthdays, Your Family, etc.), each tagged with its source calendar name
 - `outlook_get_event` - Full event details with attendees and Teams meeting links
 - `outlook_create_event` - Supports location, attendees, Teams meeting creation
 - `outlook_update_event` - PATCH updates for event modifications
