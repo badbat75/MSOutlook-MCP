@@ -1,60 +1,46 @@
 #!/usr/bin/env python3
 """Lightweight MCP stdio client for MS Outlook MCP server.
 
+Credentials are not handled here: the server reads the project .env itself,
+exactly as it does when a real MCP host spawns it.
+
 Usage:
-    python mcp_call.py <tool_name> '<json_arguments>'
+    python contrib/mcp_call.py <tool_name> '<json_arguments>'
 
 Examples:
-    python mcp_call.py outlook_list_mail '{"params":{"folder":"inbox","top":5}}'
-    python mcp_call.py outlook_get_mail '{"params":{"message_id":"AAA..."}}'
-    python mcp_call.py outlook_list_events '{"params":{"top":5}}'
-    python mcp_call.py outlook_get_profile '{"params":{}}'
+    python contrib/mcp_call.py outlook_list_mail '{"params":{"folder":"inbox","top":5}}'
+    python contrib/mcp_call.py outlook_get_mail '{"params":{"message_id":"AAA..."}}'
+    python contrib/mcp_call.py outlook_list_events '{"params":{"top":5}}'
+    python contrib/mcp_call.py outlook_get_profile '{"params":{}}'
 """
 
-import subprocess, json, sys, os
+import json
+import subprocess
+import sys
+from pathlib import Path
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SERVER = os.path.join(SCRIPT_DIR, "outlook_mcp_server.py")
-PYTHON = os.path.join(SCRIPT_DIR, "venv", "bin", "python")
-
-
-def load_dotenv(path: str) -> dict:
-    """Minimal .env parser (no external dependency). Returns KEY=VALUE pairs."""
-    values = {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                values[key.strip()] = val.strip().strip('"').strip("'")
-    except FileNotFoundError:
-        pass
-    return values
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SERVER = str(PROJECT_ROOT / "outlook_mcp_server.py")
 
 
-# Credentials are read from .env (gitignored), never hardcoded.
-_dotenv = load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
-ENV = {
-    "OUTLOOK_CLIENT_ID": _dotenv.get("OUTLOOK_CLIENT_ID", os.environ.get("OUTLOOK_CLIENT_ID", "")),
-    "OUTLOOK_CLIENT_SECRET": _dotenv.get("OUTLOOK_CLIENT_SECRET", os.environ.get("OUTLOOK_CLIENT_SECRET", "")),
-    "OUTLOOK_TENANT_ID": _dotenv.get("OUTLOOK_TENANT_ID", os.environ.get("OUTLOOK_TENANT_ID", "common")),
-    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-    "HOME": os.environ.get("HOME", "/home/openclaw"),
-}
-# Forward optional download path if configured
-if _dotenv.get("OUTLOOK_DOWNLOAD_PATH") or os.environ.get("OUTLOOK_DOWNLOAD_PATH"):
-    ENV["OUTLOOK_DOWNLOAD_PATH"] = _dotenv.get(
-        "OUTLOOK_DOWNLOAD_PATH", os.environ.get("OUTLOOK_DOWNLOAD_PATH", "")
-    )
+def venv_python() -> str:
+    """The project venv interpreter on either platform, else the current one."""
+    for candidate in (
+        PROJECT_ROOT / "venv" / "Scripts" / "python.exe",
+        PROJECT_ROOT / "venv" / "bin" / "python",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+PYTHON = venv_python()
 
 
 def call(tool: str, arguments: dict) -> dict:
     proc = subprocess.Popen(
         [PYTHON, SERVER],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=ENV,
     )
 
     def send(msg):

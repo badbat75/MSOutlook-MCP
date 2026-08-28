@@ -143,12 +143,20 @@ def get_day_of_week(iso_date: str) -> str:
 
 
 # Attachment handling constants
-# Read download path from env var, fallback to default
-_download_path = os.environ.get("OUTLOOK_DOWNLOAD_PATH")
-if _download_path:
-    ATTACHMENT_DOWNLOAD_DIR = Path(_download_path)
-else:
-    ATTACHMENT_DOWNLOAD_DIR = Path.home() / "Downloads" / "outlook_attachments"
+DEFAULT_ATTACHMENT_DIR = Path.home() / "Downloads" / "outlook_attachments"
+
+
+def attachment_download_dir() -> Path:
+    """Directory attachments are written to: OUTLOOK_DOWNLOAD_PATH, or a default.
+
+    Resolved on every call rather than at import time, because the entry point
+    merges the project .env into the environment and may do so after this
+    module has been imported. Server-side on purpose: in HTTP mode a remote
+    caller must never choose where the server writes files.
+    """
+    configured = os.environ.get("OUTLOOK_DOWNLOAD_PATH", "").strip()
+    return Path(configured).expanduser() if configured else DEFAULT_ATTACHMENT_DIR
+
 
 MAX_INLINE_SIZE_MB = 10
 VIEWABLE_IMAGE_TYPES = {
@@ -256,7 +264,8 @@ def save_attachment_to_disk(filename: str, content_bytes: bytes) -> str:
         OSError: If save fails
     """
     # Create directory if needed
-    ATTACHMENT_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    download_dir = attachment_download_dir()
+    download_dir.mkdir(parents=True, exist_ok=True)
 
     # Sanitize filename (remove path traversal attempts)
     safe_filename = Path(filename).name
@@ -264,12 +273,12 @@ def save_attachment_to_disk(filename: str, content_bytes: bytes) -> str:
         safe_filename = "attachment"
 
     # Handle duplicates
-    target_path = ATTACHMENT_DOWNLOAD_DIR / safe_filename
+    target_path = download_dir / safe_filename
     counter = 1
     while target_path.exists():
         stem = Path(safe_filename).stem
         suffix = Path(safe_filename).suffix
-        target_path = ATTACHMENT_DOWNLOAD_DIR / f"{stem}_{counter}{suffix}"
+        target_path = download_dir / f"{stem}_{counter}{suffix}"
         counter += 1
 
     # Write file

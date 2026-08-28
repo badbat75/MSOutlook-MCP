@@ -14,7 +14,7 @@ Three authorization modes:
 3. Direct mode - Provide authorization code or callback URL directly
    python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 
-Environment variables required:
+Credentials required (from the project .env, or already in the environment):
     OUTLOOK_CLIENT_ID      - Azure AD App client ID
     OUTLOOK_CLIENT_SECRET  - Azure AD App client secret
     OUTLOOK_TENANT_ID      - Azure AD tenant ID (or 'common' for multi-tenant)
@@ -30,6 +30,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 import msal
+
+from outlook_mcp.env import load_project_env
+
+# Read the same .env the server reads, so authorizing needs no separate setup
+# step. Variables already exported in the shell keep precedence.
+ENV_FILE = load_project_env()
 
 # Configuration
 CLIENT_ID = os.environ.get("OUTLOOK_CLIENT_ID", "")
@@ -108,14 +114,19 @@ def main():
 
     if not CLIENT_ID or not CLIENT_SECRET:
         print("=" * 60)
-        print("ERROR: Environment variables not set!")
+        print("ERROR: Azure AD credentials not set!")
         print("=" * 60)
         print()
-        print("Please set the following environment variables:")
+        if ENV_FILE:
+            print(f"Read {ENV_FILE}, but OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET")
+            print("are empty there.")
+        else:
+            print("No .env file found. Copy .env.example to .env and fill it in,")
+            print("or export the variables yourself:")
         print()
-        print("  export OUTLOOK_CLIENT_ID='your-client-id'")
-        print("  export OUTLOOK_CLIENT_SECRET='your-client-secret'")
-        print("  export OUTLOOK_TENANT_ID='your-tenant-id'  # or 'common'")
+        print("  OUTLOOK_CLIENT_ID='your-client-id'")
+        print("  OUTLOOK_CLIENT_SECRET='your-client-secret'")
+        print("  OUTLOOK_TENANT_ID='your-tenant-id'  # or 'common'")
         print()
         print("To get these values:")
         print("  1. Go to https://entra.microsoft.com")

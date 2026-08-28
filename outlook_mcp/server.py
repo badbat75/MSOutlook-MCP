@@ -24,6 +24,7 @@ from mcp.server.mcpserver import MCPServer, Context
 
 from .auth import AuthManager, CredentialsError, GraphClient, load_token_cache
 from .config import ConfigError, ServerConfig, load_config
+from .env import EnvFileError, load_project_env
 from .models import (
     ListMailInput, GetMailInput, SendMailInput, CreateDraftInput,
     ReplyMailInput, MoveMailInput, DeleteMailInput, UpdateMailInput, ListMailFoldersInput,
@@ -1402,6 +1403,15 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "then outlook_mcp.toml in the project root."
         ),
     )
+    parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help=(
+            "Path to the .env holding the OUTLOOK_* credentials. Defaults to "
+            "$OUTLOOK_ENV_FILE, then .env in the project root. Variables already "
+            "set in the environment always win."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1411,8 +1421,11 @@ def main(argv: Optional[List[str]] = None):
 
     args = _parse_args(argv)
     try:
+        # Before anything reads OUTLOOK_*: this is what makes the console
+        # script and the outlook_mcp_server.py wrapper behave identically.
+        load_project_env(args.env_file)
         _config = load_config(args.config)
-    except ConfigError as e:
+    except (ConfigError, EnvFileError) as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(2)
 

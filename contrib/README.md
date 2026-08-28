@@ -22,4 +22,6 @@ Credentials come from the project `.env`, the same file the server reads.
 ## openclaw.json
 
 Adapt the interpreter and script paths to the target host, then merge the
-`mcpServers` entry into that host's MCP configuration.
+`mcpServers` entry into that host's MCP configuration. The server loads the
+project `.env` itself, so the command needs no shell wrapper to export the
+credentials first.

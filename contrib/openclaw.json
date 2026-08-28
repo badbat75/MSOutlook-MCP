@@ -1,10 +1,9 @@
 {
   "mcpServers": {
     "MS_Outlook_MCP": {
-      "command": "/bin/bash",
+      "command": "/home/openclaw/MCP/MSOutlook-MCP/venv/bin/python",
       "args": [
-        "-c",
-        "set -a; . /home/openclaw/MCP/MSOutlook-MCP/.env; set +a; exec /home/openclaw/MCP/MSOutlook-MCP/venv/bin/python /home/openclaw/MCP/MSOutlook-MCP/outlook_mcp_server.py"
+        "/home/openclaw/MCP/MSOutlook-MCP/outlook_mcp_server.py"
       ]
     }
   }

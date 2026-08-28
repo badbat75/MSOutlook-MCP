@@ -31,11 +31,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .env import PROJECT_ROOT
+
 logger = logging.getLogger("outlook_mcp")
 
 CONFIG_ENV_VAR = "OUTLOOK_MCP_CONFIG"
 CONFIG_FILENAME = "outlook_mcp.toml"
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / CONFIG_FILENAME
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / CONFIG_FILENAME
 
 TRANSPORT_STDIO = "stdio"
 TRANSPORT_HTTP = "http"
