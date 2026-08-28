@@ -20,6 +20,12 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 outlook-mcp = "outlook_mcp.server:main"
 
+[tool.pytest.ini_options]
+# tests/unit only: tests/integration holds scripts that talk to the real Graph
+# API and need a token cache, so they are run by hand, never by a bare pytest.
+testpaths = ["tests/unit"]
+pythonpath = ["."]
+
 # Only the package ships. Without this, setuptools' flat-layout auto-discovery
 # also finds outlook_mcp_server.py and outlook_mcp_auth.py at the top level and
 # refuses to build ("Multiple top-level packages discovered in a flat-layout"):

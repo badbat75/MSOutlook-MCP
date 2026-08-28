@@ -11,10 +11,13 @@ Requires a valid token cache (run outlook_mcp_auth.py once) and the
 OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET / OUTLOOK_TENANT_ID variables in the
 *test* environment, which are forwarded as headers.
 
+Talks to the real Microsoft Graph. Run it by hand; pytest only collects
+tests/unit.
+
 Usage:
     . .\scripts\setup-env.ps1
-    python tests\test_http_server.py
-    python tests\test_http_server.py --verbose
+    python tests\integration\test_http_server.py
+    python tests\integration\test_http_server.py --verbose
 """
 
 import json
@@ -28,11 +31,14 @@ from pathlib import Path
 
 import httpx
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 SERVER_SCRIPT = PROJECT_ROOT / "outlook_mcp_server.py"
 VENV_PYTHON = PROJECT_ROOT / "venv" / "Scripts" / "python.exe"
 if not VENV_PYTHON.exists():
     VENV_PYTHON = PROJECT_ROOT / "venv" / "bin" / "python"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+from outlook_mcp.env import load_project_env  # noqa: E402
 
 STARTUP_TIMEOUT = 30  # seconds to wait for the port to open
 REQUEST_TIMEOUT = 45
@@ -157,13 +163,17 @@ class HttpMCPClient:
 def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
+    # The credentials this test sends as headers: read from the project .env,
+    # the same file the server would read if it were allowed to (it is not,
+    # see the empty --env-file below).
+    load_project_env()
     creds = {
         HEADER_CLIENT_ID: os.environ.get("OUTLOOK_CLIENT_ID", ""),
         HEADER_CLIENT_SECRET: os.environ.get("OUTLOOK_CLIENT_SECRET", ""),
         HEADER_TENANT_ID: os.environ.get("OUTLOOK_TENANT_ID", "common"),
     }
     if not creds[HEADER_CLIENT_ID] or not creds[HEADER_CLIENT_SECRET]:
-        print("ERROR: OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET not set. Run: . .\\scripts\\setup-env.ps1")
+        print("ERROR: OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET are not set and not in the project .env")
         sys.exit(1)
 
     port = free_port()
@@ -179,6 +189,11 @@ def main():
             f'[server]\ntransport = "http"\nbind_host = "127.0.0.1"\nbind_port = {port}\n',
             encoding="utf-8",
         )
+        # Stripping OUTLOOK_* from the environment is not enough on its own:
+        # the server reads the project .env by itself. Point it at an empty one
+        # so the request headers really are the only credential source.
+        env_path = Path(tmp) / "empty.env"
+        env_path.write_text("# intentionally empty\n", encoding="utf-8")
 
         print("=" * 60)
         print("Outlook MCP Server - HTTP Transport Test")
@@ -190,7 +205,11 @@ def main():
         print()
 
         proc = subprocess.Popen(
-            [get_python(), str(SERVER_SCRIPT), "--config", str(config_path)],
+            [
+                get_python(), str(SERVER_SCRIPT),
+                "--config", str(config_path),
+                "--env-file", str(env_path),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

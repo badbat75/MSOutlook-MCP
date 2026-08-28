@@ -2,13 +2,13 @@ r"""
 Outlook MCP Server - Automated Integration Test
 =================================================
 Starts the MCP server as a subprocess and runs JSON-RPC calls via stdio.
-Requires valid auth tokens and environment variables.
+Talks to the real Microsoft Graph, so it needs a valid token cache and a
+working app registration. Run it by hand; pytest only collects tests/unit.
 
 Usage:
-    . .\scripts\setup-env.ps1
-    python tests\test_mcp_server.py
-    python tests\test_mcp_server.py --verbose       # show full responses
-    python tests\test_mcp_server.py --quick         # handshake + profile only
+    python tests\integration\test_mcp_server.py
+    python tests\integration\test_mcp_server.py --verbose  # show full responses
+    python tests\integration\test_mcp_server.py --quick    # handshake + profile only
 """
 
 import json
@@ -22,15 +22,21 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 TIMEOUT = 45  # seconds per response
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 SERVER_SCRIPT = PROJECT_ROOT / "outlook_mcp_server.py"
-VENV_PYTHON = PROJECT_ROOT / "venv" / "Scripts" / "python.exe"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+from outlook_mcp.env import load_project_env  # noqa: E402
 
 
 def get_python():
-    """Use venv python if available, else current interpreter."""
-    if VENV_PYTHON.exists():
-        return str(VENV_PYTHON)
+    """Use the project venv interpreter on either platform, else the current one."""
+    for candidate in (
+        PROJECT_ROOT / "venv" / "Scripts" / "python.exe",
+        PROJECT_ROOT / "venv" / "bin" / "python",
+    ):
+        if candidate.exists():
+            return str(candidate)
     return sys.executable
 
 
@@ -428,10 +434,12 @@ def main():
     print(f"Verbose: {verbose}")
     print()
 
-    # Check env vars
+    # Same .env the server under test will read, so running this needs no
+    # separate shell setup step.
+    load_project_env()
     for var in ("OUTLOOK_CLIENT_ID", "OUTLOOK_CLIENT_SECRET", "OUTLOOK_TENANT_ID"):
         if not os.environ.get(var):
-            print(f"ERROR: {var} not set. Run: . .\\scripts\\setup-env.ps1")
+            print(f"ERROR: {var} is not set and not in the project .env")
             sys.exit(1)
 
     client = MCPTestClient(verbose=verbose)
