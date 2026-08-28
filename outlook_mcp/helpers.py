@@ -2,6 +2,7 @@
 
 import base64
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -12,7 +13,7 @@ from .auth import CredentialsError
 
 
 # Reusable guidance for building a valid OData $filter (shared by the pre-flight
-# validation in server.py and the 400-error handler below).
+# validation below and by the 400-error handler).
 FILTER_SYNTAX_HINT = (
     "Build $filter with comparison operators (eq, ne, gt, ge, lt, le) joined by "
     "and/or, using ISO-8601 datetimes with a 'Z' suffix. Examples: "
@@ -20,6 +21,27 @@ FILTER_SYNTAX_HINT = (
     "\"receivedDateTime ge 2026-05-26T00:00:00Z and receivedDateTime lt 2026-05-27T00:00:00Z\", "
     "\"from/emailAddress/address eq 'john@example.com'\"."
 )
+
+# Whole-word OData operators, plus function-style operators like contains(...).
+_ODATA_OPERATORS = re.compile(
+    r"\b(eq|ne|gt|ge|lt|le|and|or|not|in|has)\b"
+    r"|\b(contains|startswith|endswith)\s*\(",
+    re.IGNORECASE,
+)
+
+
+def validate_odata_filter(filter_str: str) -> None:
+    """Reject an obviously malformed $filter (no operator) before hitting Graph.
+
+    Catches the common mistake of passing a bare value like
+    'receivedDateTime 2026-05-26', returning actionable guidance so the caller
+    can self-correct without a wasted round-trip.
+    """
+    if not _ODATA_OPERATORS.search(filter_str):
+        raise ValueError(
+            f"Invalid $filter '{filter_str}': no comparison operator found. "
+            f"{FILTER_SYNTAX_HINT}"
+        )
 
 
 def make_recipients(addresses: List[str]) -> list:
