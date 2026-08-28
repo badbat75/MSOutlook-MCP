@@ -178,6 +178,7 @@ cache_dir = "/opt/outlook-mcp/data/caches"       # optional, either transport, a
 
 [attachments]
 download_path = "~/Downloads/outlook_attachments"   # optional
+retention_minutes = 60    # HTTP only; unfetched downloads expire, 0 to keep them
 ```
 
 The HTTP endpoint is `http://<bind_host>:<bind_port>/mcp` (streamable HTTP).
@@ -200,9 +201,13 @@ tokens. If a proxy has to live on another host, tunnel to the loopback port;
 do not widen the bind.
 
 The matching duty on the proxy side is `proxy_set_header X-Auth-Email ...` in
-**every** location that forwards to the server: `/mcp`, `/oauth/` and
-`/attachments/` alike. A location without it passes the client's own header
-through. A missing or blank header is refused, so a forgotten line fails closed.
+**every** location that reaches a mailbox: `/mcp` and `/oauth/`. A location
+without it passes the client's own header through. A missing or blank header is
+refused, so a forgotten line fails closed.
+
+`/attachments/` is the deliberate exception and must be **unauthenticated**, at
+the proxy and in the app alike: see "Downloaded Attachments" below for why a
+link the agent cannot follow is not a link, and what carries the weight instead.
 
 ### `[server].allowed_hosts`, or: 421 Invalid Host header
 
@@ -371,14 +376,14 @@ rendered systemd unit, starts the service. The invariants behind it:
 
 | Module | Purpose |
 |--------|---------|
-| `outlook_mcp/app.py` | The `mcp = MCPServer(...)` instance, `app_lifespan` (builds the `GraphClientPool`), `get_config()` / `set_config()`. Tool modules import `mcp` from here, which is what keeps server.py free to import the tools |
+| `outlook_mcp/app.py` | The `mcp = MCPServer(...)` instance, `app_lifespan` (builds the `GraphClientPool`, starts and cancels the download reaper), `get_config()` / `set_config()`. Tool modules import `mcp` from here, which is what keeps server.py free to import the tools |
 | `outlook_mcp/server.py` | Entry point only: `_parse_args()`, `main()`, and the `from . import tools` whose side effect registers them |
 | `outlook_mcp/config.py` | `PROJECT_ROOT`, `ServerConfig` + `load_config()`, `is_loopback()`, `_validate_deployment()`. The whole configuration, and the only place any of it comes from |
 | `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_config()`, `ProxyAuthPolicy`, `Principal`, `GraphClientPool`, `current_user()`, `get_graph()` |
 | `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, one cache and one cache path per principal), `GraphClient` (async HTTP), `load_token_cache()` / `save_token_cache()` / `user_cache_path()` / `shared_cache_path()`, `CredentialsError`, and the shared constants `GRAPH_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `USER_CACHE_DIR` / `authority_for()`. The two path helpers take an optional directory, `None` meaning the home-directory default, so a caller can pass `config.cache_directory` straight through |
 | `outlook_mcp/authorize.py` | The OAuth2 authorization code flow: browser, headless, `--code` and `--user` modes. The only place that flow lives |
 | `outlook_mcp/enroll.py` | The two enrollment routes and the in-memory table of sign-ins in flight |
-| `outlook_mcp/downloads.py` | The `/attachments/<token>` route, the in-memory table of one-time links, `download_root()` / `message_dir()` (where a downloaded file goes), `offer()`, `delete_message_downloads()` |
+| `outlook_mcp/downloads.py` | The `/attachments/<token>` route, the in-memory table of one-time links, `download_root()` / `message_dir()` (where a downloaded file goes), `offer()`, `delete_message_downloads()`, `_consume_file()` (delete on serve) and `sweep()` / `reap_expired_downloads()` (delete on expiry) |
 | `outlook_mcp/folders.py` | `WELL_KNOWN_FOLDERS`, `find_folder_id_by_name()`, `resolve_folder()`, `format_folder_tree()` |
 | `outlook_mcp/attachments.py` | `read_attachment_meta()`, `attach_small_file()` (<=3MB inline), `attach_large_file()` (upload session), `attach_files()` |
 | `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`, `format_attachment_summary()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `save_attachment_to_disk()` |
@@ -459,23 +464,48 @@ each level pays for itself:
   in sync. `outlook_delete_attachment_files` is handed a message id, never a
   path, and empties exactly one directory. Recomputing beats recording.
 
-**A download link is a one-time ticket, and it is bound to a user.**
-`offer()` mints an opaque token into an in-memory table; `/attachments/<token>`
-runs the same `ProxyAuthPolicy` the tools do, refuses a token minted for anybody
-else, and consumes the token on the way through, wrong user included. A leaked
-link therefore buys nothing, and a transcript kept afterwards holds nothing
-usable. Do not add a "fetch it again" convenience: re-issuing is one tool call
-away, and a reusable link in a chat log is the whole risk.
+**A download link is an unauthenticated capability that destroys itself.** This
+is the one place in the project where a route asks for nothing, and it is a
+requirement rather than a concession. The party that has to fetch the file is
+the agent that just called the tool; the credential its MCP client presents on
+`/mcp` is deliberately one the agent never sees, so a link gated on that
+credential can never be followed by the only caller that wants it. Handing the
+key to the agent instead would put it in the transcript, which is worse than
+anything this route can leak.
+
+So the token is the whole credential, and it is made worthless as fast as
+possible:
+
+- `offer()` mints 256 unguessable bits into an in-memory table, naming one file.
+- `_take()` pops the ticket, so a second fetch is a 404.
+- `_consume_file()` runs as the response's `BackgroundTask`, after the body has
+  been streamed off that very file, and **deletes it**. The link in the answer
+  is already dead by the time the answer is read.
+- `reap_expired_downloads()` sweeps whatever nobody fetched once
+  `[attachments].retention_minutes` runs out (60 by default, `0` disables it).
+  It walks the filesystem, not the ticket table: a link expires in fifteen
+  minutes while the file outlives it, and a restart empties the table entirely.
+
+Do not add a "fetch it again" convenience, and do not make the link reusable:
+one fetch plus deletion is what buys the right to skip authentication. And do
+not add an identity check back "for safety" without removing the whole scheme:
+a check the agent cannot satisfy just breaks downloads, which is the bug this
+replaced.
 
 Consequences worth keeping in mind:
 
-- **`/attachments/` needs the proxy's `proxy_set_header` line** exactly like
-  `/mcp` and `/oauth/`. Without it the route sees the client's own header.
+- **`/attachments/` must be exempt from the proxy's authentication**, unlike
+  `/mcp` and `/oauth/`. A gate there answers 401 to the agent and nothing works.
 - The route answers **404 unless `[auth].public_url` is set**, and without it
   the tool falls back to reporting the server-side path and says so. It has no
   other way to know what URL it is reachable on.
-- Nothing prunes the files. Deletion is the agent's job through the tool, or the
-  operator's through a timer over `download_path`.
+- **Retention is HTTP only** (`ServerConfig.retention_seconds` returns `None`
+  over stdio). There the file the tool wrote is the answer itself, in the
+  caller's own download directory: expiring it would delete the user's file.
+- The reaper is started by `app_lifespan` and cancelled with it, because a
+  background task has to be cancelled by whatever started it. `app.py` imports
+  `downloads` inside the lifespan function: `downloads` registers its route on
+  `mcp`, so it imports `app` and cannot be imported by it at module scope.
 
 ### MCP Tool Categories
 
@@ -483,8 +513,8 @@ Consequences worth keeping in mind:
 - `outlook_list_mail` - OData filtering, full-text search, pagination ($top, $skip); `folder="*"` searches across the whole mailbox (all folders), and subfolder display names (e.g. "Centri Estivi") resolve automatically
 - `outlook_get_mail` - Full message details including body HTML and attachments metadata
 - `outlook_list_attachments` - List attachment metadata (name, size, type, ID)
-- `outlook_get_attachment` - Download attachment to the configured path (default: ~/Downloads/outlook_attachments/), filed per user and per message. Answers with the file path over stdio, and over HTTP with a one-time link at `<public_url>/attachments/<token>`. Every attachment goes to a file: a base64 data URL of a real attachment is far too heavy to send back through MCP
-- `outlook_delete_attachment_files` - Remove what was downloaded from one message (or one named file of it) from the server's filesystem. The mailbox is untouched and the attachment can be fetched again
+- `outlook_get_attachment` - Download attachment to the configured path (default: ~/Downloads/outlook_attachments/), filed per user and per message. Answers with the file path over stdio, and over HTTP with a one-time link at `<public_url>/attachments/<token>` that needs no credential and deletes the file when fetched. Every attachment goes to a file: a base64 data URL of a real attachment is far too heavy to send back through MCP
+- `outlook_delete_attachment_files` - Remove what was downloaded from one message (or one named file of it) from the server's filesystem. The mailbox is untouched and the attachment can be fetched again. A convenience over HTTP, where a fetched file is already gone and an unfetched one expires; the only way over stdio
 - `outlook_send_mail` - HTML body support, CC/BCC, importance levels
 - `outlook_create_draft` - Create draft without sending
 - `outlook_reply_mail` - Reply or reply-all with comment
@@ -612,7 +642,8 @@ is never registered.
 - Token cache issues: delete `~/.outlook_mcp_token_cache.json` and re-auth. For one user of an HTTP deployment the file is `<sha256(lowercased address)>.json` under `[auth].cache_dir`, or under `~/.outlook_mcp/caches/` when unset; `outlook_mcp.auth.user_cache_path()` computes it, and `shared_cache_path()` the single-account one. Never guess the path: ask the deployed code, `load_config(<its toml>)` then `user_cache_path(address, config.cache_directory)`
 - "\<user\> has not authorized this server": that user has no cache, or nothing usable in it. Not a bug, and deliberately not a fallback: they enrol at `/oauth/login`, or an operator runs `outlook-mcp-auth --user <them>`
 - "No valid token available", or "Could not obtain a token for this client id", together with `AADSTS700016` from MSAL, means the app registration behind the client id no longer exists in the directory: that is an Azure-side problem, not a code regression. The second message comes from the secret verification described above, which is the first thing to fail when the registration is gone
-- A download link that answers 404: it is single use, it expires after `downloads.TICKET_TTL_SECONDS`, and it is refused for anyone but the user it was minted for. The table is in memory, so a restart invalidates every outstanding link. All of that is by design; the fix is to call `outlook_get_attachment` again
+- A download link that answers 404: it is single use and the fetch deleted the file, or it expired after `downloads.TICKET_TTL_SECONDS`. The table is in memory, so a restart invalidates every outstanding link. All of that is by design; the fix is to call `outlook_get_attachment` again. A **401 or a redirect to a login page** is a different problem and not the server's: the proxy is authenticating `/attachments/`, which it must not
+- A downloaded file that vanished from `download_path` before anyone deleted it: `[attachments].retention_minutes` (default 60). The sweep logs how many it took
 - Graph API errors: check response body in exception (includes error code and message)
 - Rate limiting: Graph returns 429 with Retry-After header (not auto-handled currently)
 - The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it, which may not even be traversable by the server's user (e.g. a daemon started from another user's 0700 home). With mcp SDK 1.x this used to crash at startup because FastMCP's pydantic-settings probed `./.env`; SDK 2.x reads no `.env` / `MCP_*` at all, and the one path this project resolves itself (`outlook_mcp.toml` via `config.DEFAULT_CONFIG_PATH`) hangs off `config.PROJECT_ROOT`, which is `__file__`-derived. Keep it that way: no relative path, no `Path.cwd()`

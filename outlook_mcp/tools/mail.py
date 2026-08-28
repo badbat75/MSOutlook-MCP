@@ -528,8 +528,12 @@ async def outlook_get_attachment(params: GetAttachmentInput, ctx: Context = None
     server runs on, so what comes back depends on where the caller is: a path
     when that is the same machine, and otherwise a one-time download link.
 
-    The file stays there until it is deleted. Call
-    outlook_delete_attachment_files with the same message ID when done with it.
+    A download link needs no credential of its own: fetch it straight away, with
+    a plain GET. It works exactly once, and that fetch deletes the file from the
+    server. A file nobody fetches is deleted when [attachments].retention_minutes
+    runs out. When the answer is a path instead, the file stays until it is
+    deleted: call outlook_delete_attachment_files with the same message ID when
+    done with it.
 
     Args:
         params: Message ID and attachment ID
@@ -585,9 +589,10 @@ async def outlook_get_attachment(params: GetAttachmentInput, ctx: Context = None
             if url:
                 result += f"✅ **Ready to download:**\n{url}\n\n"
                 result += (
-                    f"*One-time link, good for {minutes} minutes and only for "
-                    f"you. The file stays on the server until you call "
-                    f"`outlook_delete_attachment_files`.*"
+                    f"*Fetch this now with a plain GET: it needs no "
+                    f"authorization, it works once, and downloading it deletes "
+                    f"the file from the server. The link dies in {minutes} "
+                    f"minutes, and the file soon after if nobody takes it.*"
                 )
             elif user is not None:
                 result += f"✅ **Saved on the server:**\n`{file_path}`\n\n"
@@ -595,7 +600,8 @@ async def outlook_get_attachment(params: GetAttachmentInput, ctx: Context = None
                     "*That path is on the machine the server runs on, not "
                     "yours: set [auth].public_url in outlook_mcp.toml and the "
                     "server can hand you the file over HTTP instead. Remove it "
-                    "with `outlook_delete_attachment_files`.*"
+                    "with `outlook_delete_attachment_files`, or leave it to "
+                    "[attachments].retention_minutes.*"
                 )
             else:
                 result += f"✅ **Saved to disk:**\n`{file_path}`\n\n"

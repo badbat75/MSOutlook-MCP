@@ -251,7 +251,10 @@ one person's grant answer another person's request.
 in.** The identity header proves nothing by itself, it is believable only
 because the proxy replaces whatever the client sent. That is why the server
 refuses to start on anything but a loopback bind, and why the proxy must set
-the header on every location it forwards from.
+the header on every location that reaches a mailbox. `/attachments/` is the one
+location that does not: it serves a file the server already fetched, to whoever
+holds a token it minted for exactly that file. Step 4 says why it has to work
+that way.
 
 ### 1. Bind to loopback and name the header
 
@@ -269,6 +272,9 @@ client_secret = "..."
 [auth]
 user_header = "X-Auth-Email"
 public_url = "https://outlook-mcp.example.com"    # turns on browser enrollment
+
+[attachments]
+retention_minutes = 60    # downloads nobody fetched are deleted after this
 ```
 
 **`allowed_hosts` is not optional behind a proxy.** A loopback bind makes the
@@ -298,20 +304,31 @@ server {
         # This line is the security boundary. proxy_set_header REPLACES the
         # client's version of the header, so a caller cannot smuggle in an
         # address of its own. It has to be in EVERY location that reaches the
-        # server: /mcp, /oauth/ and /attachments/ alike.
+        # server: /mcp and /oauth/ alike.
         proxy_set_header X-Auth-Email $authenticated_user;
 
         # Streamable HTTP holds long responses open.
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
+
+    # The exception, and a deliberate one: an attachment link carries no
+    # credential and is not meant to. The party that has to follow it is the
+    # agent that just called the tool, and whatever key its MCP client uses on
+    # /mcp is one the agent never gets to see. So this location authenticates
+    # nobody. What protects it is the link itself: 256 unguessable bits, good
+    # for one fetch, and that fetch deletes the file. See step 4.
+    location /attachments/ {
+        auth_request off;
+        proxy_pass http://127.0.0.1:8000;
+    }
 }
 ```
 
-A location that forwards without that `proxy_set_header` line passes the
-client's own header through, and the whole scheme collapses. The server refuses
-a request whose header is missing or blank, so a forgotten line fails closed
-rather than silently serving the wrong mailbox.
+A location that forwards to `/mcp` or `/oauth/` without that `proxy_set_header`
+line passes the client's own header through, and the whole scheme collapses.
+The server refuses a request whose header is missing or blank, so a forgotten
+line fails closed rather than silently serving the wrong mailbox.
 
 ### 3. Enrol each user
 
@@ -347,11 +364,29 @@ answers with a link instead:
 https://outlook-mcp.example.com/attachments/<token>
 ```
 
-The token is minted by the server, and it is good for **one fetch, for fifteen
-minutes, by the user it was issued to**. The route runs the same identity check
-the tools do, so a link copied into a shared transcript is worth nothing to the
-next reader, and nothing at all once it has been used. Which means `/attachments/`
-needs the same `proxy_set_header` line as everything else the proxy forwards.
+**That link needs no credential, and that is the requirement, not an oversight.**
+The party that has to follow it is the agent that just called the tool, and the
+key its MCP client presents on `/mcp` is deliberately one the agent never sees:
+a link it cannot fetch is not a link. So `/attachments/` is the one location the
+proxy must let through unauthenticated.
+
+What stands in for authentication is the link itself:
+
+- **256 unguessable bits**, minted per call, naming one file and nothing else.
+  There is no path in it to tamper with and nothing to enumerate.
+- **One fetch, and fifteen minutes.** The token is consumed on the way through.
+- **The fetch deletes the file.** By the time the answer holding the link has
+  been written, the file behind it is gone and the URL answers 404. A transcript
+  kept afterwards holds a dead link.
+- **What nobody fetches goes too**, after `[attachments].retention_minutes`
+  (60 by default, `0` to keep files until a tool deletes them). This is what
+  stops the server's disk from slowly filling with other people's mail.
+
+The window in which a leaked link is worth anything is therefore the seconds
+between the tool answering and the agent fetching. If that is still too wide for
+you, shorten `retention_minutes` and put the download route behind your
+authentication after all: the cost is that the agent can no longer fetch its own
+attachments, and a person has to click every link by hand.
 
 Files are written per user and per message:
 
@@ -369,9 +404,10 @@ outlook_delete_attachment_files(message_id="AAMk...", filename="invoice.pdf")
 ```
 
 That deletes from the server's filesystem only. The attachment stays in the
-mailbox and can be downloaded again. Nothing expires the files on its own, so
-on a busy deployment either tell the agent to clean up, or age
-`<download_path>` out with a systemd timer or `tmpfiles.d`.
+mailbox and can be downloaded again. It is a convenience rather than a duty:
+a fetched file is already gone, and an unfetched one goes on its own when
+`retention_minutes` runs out. Over stdio it is the only way, because there the
+file is the user's own download and nothing expires it.
 
 ---
 
@@ -514,6 +550,7 @@ it starts, from any shell or any working directory.
 | `421 Invalid Host header` | From the MCP SDK, not nginx: a loopback bind turns on DNS-rebinding protection, which accepts only localhost. Put the site in `[server].allowed_hosts` |
 | `<user> has not authorized this server` | That user has never enrolled: `/oauth/login`, or `outlook-mcp-auth --user <them>` |
 | An attachment answers with a server path instead of a link | `[auth].public_url` is not set, so the server cannot say what URL it is reachable on |
-| `This download link is not valid` | It has been used, it is over fifteen minutes old, or it was issued to somebody else. Ask for the attachment again |
+| `This download link is not valid` | It has been used (which also deleted the file), it is over fifteen minutes old, or the server restarted. Ask for the attachment again |
+| A download link answers `401` from nginx | `/attachments/` is behind the proxy's authentication. It must not be: the agent that has to fetch it holds no key. See step 2 |
 | Browser callback never arrives | Ctrl+C, then paste the callback URL by hand, or use `--no-browser` |
 | `AADSTS...` errors from Microsoft | See the error-by-error table in [SETUP_PERSONAL_ACCOUNTS.md](SETUP_PERSONAL_ACCOUNTS.md#troubleshooting) |

@@ -64,7 +64,8 @@ user_header = "X-Auth-Email"
 # registered as a redirect URI on the app registration above. And attachment
 # downloads, so outlook_get_attachment answers a remote caller with a one-time
 # link at <public_url>/attachments/<token> instead of a path on this machine
-# that the caller cannot open.
+# that the caller cannot open. That link asks for no credential of its own, so
+# the proxy has to let /attachments/ through unauthenticated: see docs/SETUP.md.
 # public_url = "https://outlook-mcp.example.com"
 
 [attachments]
@@ -73,3 +74,10 @@ user_header = "X-Auth-Email"
 # this directory each user gets one of their own, and each message one below
 # that, which is what outlook_delete_attachment_files empties.
 # download_path = "~/Downloads/outlook_attachments"
+
+# HTTP only: how long a download nobody fetched stays on the server. Fetching a
+# link already deletes the file behind it, so this is the backstop for the links
+# nobody follows, and it is what keeps a host from filling up with other
+# people's mail. 0 keeps them until a tool deletes them. Ignored over stdio,
+# where the file the tool wrote is the answer itself and is the user's own.
+# retention_minutes = 60

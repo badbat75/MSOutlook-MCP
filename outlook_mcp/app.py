@@ -10,6 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 
 from .config import CONFIG_FILENAME, ServerConfig
@@ -47,7 +48,16 @@ def proxy_auth_policy(config: ServerConfig) -> Optional[ProxyAuthPolicy]:
 
 @asynccontextmanager
 async def app_lifespan(app):
-    """Create the Graph client pool on startup, close every client on shutdown."""
+    """Create the Graph client pool on startup, close every client on shutdown.
+
+    It also owns the download reaper, because a background task has to be
+    cancelled by whatever started it and this is the one scope that spans the
+    life of the server.
+    """
+    # Imported here and not at module scope: downloads.py registers its route on
+    # `mcp`, so it imports this module and cannot be imported by it.
+    from .downloads import reap_expired_downloads
+
     pool = GraphClientPool(_config.cache_directory)
     credentials = credentials_from_config(_config)
     proxy_auth = proxy_auth_policy(_config)
@@ -66,7 +76,19 @@ async def app_lifespan(app):
             _config.source or CONFIG_FILENAME,
         )
 
-    yield {"pool": pool, "credentials": credentials, "proxy_auth": proxy_auth}
+    async with anyio.create_task_group() as housekeeping:
+        if _config.retention_seconds is not None:
+            logger.info(
+                "Retention for downloads nobody fetches: %d minutes.",
+                _config.retention_minutes,
+            )
+            housekeeping.start_soon(reap_expired_downloads)
+        try:
+            yield {"pool": pool, "credentials": credentials, "proxy_auth": proxy_auth}
+        finally:
+            # The reaper loops forever by design, so shutdown is a cancellation
+            # rather than something to wait for.
+            housekeeping.cancel_scope.cancel()
 
     await pool.close_all()
 

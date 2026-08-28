@@ -324,20 +324,23 @@ def check_unenrolled_user(url, identity, verbose):
 
 
 def check_download_route(url, identity, verbose):
-    # The route is mounted, runs the same identity policy the tools do, and
-    # hands out nothing it did not mint. Minting one for real needs a message
-    # with an attachment, which this test does not create.
+    # The route is mounted, takes no identity at all, and hands out nothing it
+    # did not mint. Anonymous is the case that matters: the agent following one
+    # of these links has no credential, and a route that refused it would make
+    # every attachment unreachable over HTTP. Minting a real token needs a
+    # message with an attachment, which this test does not create.
     base = url.rsplit("/mcp", 1)[0]
     with httpx.Client(timeout=REQUEST_TIMEOUT) as http:
         anonymous = http.get(f"{base}/attachments/not-a-real-token")
-        assert anonymous.status_code == 403, (
-            f"expected 403 without the identity header, got {anonymous.status_code}"
+        assert anonymous.status_code == 404, (
+            f"expected 404 for an unknown token, got {anonymous.status_code}"
         )
-        unknown = http.get(f"{base}/attachments/not-a-real-token", headers=identity)
-        assert unknown.status_code == 404, (
-            f"expected 404 for an unknown token, got {unknown.status_code}"
+        assert "not valid" in anonymous.text, anonymous.text[:200]
+        head = http.head(f"{base}/attachments/not-a-real-token")
+        assert head.status_code == 405, (
+            f"expected 405 for HEAD, got {head.status_code}"
         )
-    return "403 without the header, 404 for an unknown token"
+    return "404 for an unknown token with no credential, 405 for HEAD"
 
 
 def check_list_mail(url, identity, verbose):

@@ -25,6 +25,7 @@ operator, and a deployment can be read off one artefact:
 
     [attachments]
     download_path = "~/Downloads/outlook_attachments"
+    retention_minutes = 60    # HTTP only; 0 keeps files until a tool deletes them
 
 Lookup order for the file:
 
@@ -75,6 +76,9 @@ DEFAULT_TENANT_ID = "common"
 DEFAULT_USER_HEADER = "X-Auth-Email"
 DEFAULT_DOWNLOAD_PATH = Path.home() / "Downloads" / "outlook_attachments"
 
+# How long an attachment nobody downloaded stays on the server, in minutes.
+DEFAULT_RETENTION_MINUTES = 60
+
 # Path under which the streamable HTTP endpoint is mounted.
 HTTP_PATH = "/mcp"
 
@@ -113,6 +117,9 @@ class ServerConfig:
     cache_dir: Optional[str] = None
     """Where the MSAL token caches go. None leaves them under the home directory."""
     download_path: Optional[str] = None
+    retention_minutes: int = DEFAULT_RETENTION_MINUTES
+    """Minutes an attachment nobody downloaded stays on the server. 0 keeps it
+    until a tool deletes it."""
     source: Optional[Path] = None
     """The file the values were read from, or None when defaults apply."""
 
@@ -131,6 +138,20 @@ class ServerConfig:
         if not self.download_path:
             return DEFAULT_DOWNLOAD_PATH
         return Path(self.download_path).expanduser()
+
+    @property
+    def retention_seconds(self) -> Optional[int]:
+        """How long an unfetched download lives, or None when it never expires.
+
+        None over stdio, and that is not a default worth making configurable:
+        there the file the tool wrote is the answer itself, in the caller's own
+        download directory, so an expiry would delete the user's file. Over HTTP
+        the same file is a staging buffer nobody can reach except through a
+        one-time link, and one nobody followed is only litter.
+        """
+        if not self.is_http or self.retention_minutes <= 0:
+            return None
+        return self.retention_minutes * 60
 
     @property
     def cache_directory(self) -> Optional[Path]:
@@ -355,8 +376,23 @@ def _parse_auth(data: dict, source: Path) -> dict:
 
 def _parse_attachments(data: dict, source: Path) -> dict:
     attachments = _table(data, "attachments", source)
-    _warn_unknown(attachments, {"download_path"}, "attachments", source)
-    return {"download_path": _string(attachments, "download_path", "attachments", source)}
+    _warn_unknown(
+        attachments, {"download_path", "retention_minutes"}, "attachments", source
+    )
+
+    retention = attachments.get("retention_minutes", DEFAULT_RETENTION_MINUTES)
+    # bool is a subclass of int, and `retention_minutes = false` reading as
+    # "0, keep them forever" is the opposite of what anyone writing it meant.
+    if isinstance(retention, bool) or not isinstance(retention, int) or retention < 0:
+        raise ConfigError(
+            f"{source}: [attachments].retention_minutes must be a non-negative "
+            f"integer (0 keeps downloads until a tool deletes them)"
+        )
+
+    return {
+        "download_path": _string(attachments, "download_path", "attachments", source),
+        "retention_minutes": retention,
+    }
 
 
 def _validate_deployment(config: ServerConfig, source: Path) -> None:

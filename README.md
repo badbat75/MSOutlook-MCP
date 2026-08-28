@@ -12,7 +12,7 @@ over stdio or streamable HTTP.
 | `outlook_list_mail` | List emails with OData filters, full-text search, pagination; `folder="*"` searches every folder |
 | `outlook_get_mail` | Full email details (body, headers, attachments) |
 | `outlook_list_attachments` | List attachment metadata for a message |
-| `outlook_get_attachment` | Download attachment to disk; over HTTP, answers with a one-time link the caller can fetch |
+| `outlook_get_attachment` | Download attachment to disk; over HTTP, answers with a one-time link that needs no credential and deletes the file when fetched |
 | `outlook_delete_attachment_files` | Remove a message's downloaded files from the server's disk (the mailbox is untouched) |
 | `outlook_send_mail` | Send email with HTML, CC/BCC, importance, attachments |
 | `outlook_create_draft` | Create draft email without sending |

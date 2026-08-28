@@ -7,17 +7,27 @@ arrange. Over HTTP it is not: the file lands under the account the service runs
 as, on a host the agent may never reach, and a path in a tool result is useless
 to whoever asked for it.
 
-This module is the bridge, and it is three decisions:
+This module is the bridge, and it is four decisions:
 
 * **One route, /attachments/<token>.** A caller never names a path, only an
   opaque token this server minted, so there is nothing to traverse out of and no
   way to ask for a file the server did not offer.
-* **A token belongs to one user and burns on use.** The route runs the same
-  proxy identity policy the tools do and refuses a token minted for anybody
-  else, so a link that ends up in a shared transcript is worth nothing to a
-  second reader and nothing at all once it has been fetched. The table lives in
-  memory: a restart costs one repeated tool call, while persisting it would keep
-  live download links on disk.
+* **The token is the whole credential.** The route asks for nothing else: no
+  identity header, and no credential of the deployment's own. That is not a gap,
+  it is the requirement. The party that has to fetch the file is the agent that
+  just called the tool, and it reaches this server through an MCP client that
+  holds the reverse proxy's key without ever showing it to the agent. A link the
+  agent cannot follow is not a link. So the proxy has to let /attachments/
+  through unauthenticated, and the token carries the weight: 256 unguessable
+  bits naming one file, minted per call.
+* **Fetching it destroys it.** The first successful GET pops the ticket and
+  deletes the file from the server, so the link in the transcript is dead by the
+  time the answer is written, and a second reader gets a 404. What nobody
+  fetches is deleted anyway once [attachments].retention_minutes runs out, by
+  ``reap_expired_downloads``. Both halves matter: the first is what makes an
+  unauthenticated link safe, the second is what stops a host from slowly filling
+  with other people's mail. The ticket table lives in memory, so a restart
+  invalidates every outstanding link, which costs one repeated tool call.
 * **Every file is filed under its user and its message**, at
   ``<download_path>/<user digest>/msg-<message digest>/<filename>``. The first
   level keeps one person's attachments out of another's directory listing, the
@@ -29,7 +39,10 @@ This module is the bridge, and it is three decisions:
 
 Over stdio the user level is absent (there is only one person, and the download
 directory is their own), but the message level is not: the same tool deletes the
-same way on both transports.
+same way on both transports. Nothing else here applies over stdio, and the
+expiry least of all: there the file the tool wrote *is* the answer, sitting in
+the caller's own download directory, and a server that deleted it an hour later
+would be deleting the user's file out from under them.
 """
 
 import hashlib
@@ -40,11 +53,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+import anyio
+from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse, Response
 
-from .app import get_config, mcp, proxy_auth_policy
-from .auth import CredentialsError, user_digest
+from .app import get_config, mcp
+from .auth import user_digest
 from .config import DOWNLOAD_ROUTE
 
 logger = logging.getLogger("outlook_mcp")
@@ -56,6 +71,11 @@ TICKET_TTL_SECONDS = 15 * 60
 
 # Every tool call can mint one, so the table is bounded like the enrollment one.
 MAX_PENDING_TICKETS = 256
+
+# How often the reaper looks for downloads whose retention has run out. Short
+# enough that "an hour" means about an hour, cheap enough to ignore: one walk of
+# one directory tree.
+SWEEP_INTERVAL_SECONDS = 5 * 60
 
 # Directory name standing for one message. Shortened from the full digest
 # because it only has to be unique within one mailbox's download directory, and
@@ -98,20 +118,33 @@ def _mint(path: Path, name: str, content_type: str, user: str) -> str:
     return token
 
 
-def _take(token: str, user: str) -> Optional[_Ticket]:
-    """The ticket this user was given under `token`, consumed so it cannot replay."""
+def _take(token: str) -> Optional[_Ticket]:
+    """The ticket named by `token`, consumed so the link cannot be replayed."""
     ticket = _pending.pop(token, None)
     if ticket is None:
         return None
     if time.monotonic() - ticket.minted_at > TICKET_TTL_SECONDS:
         return None
-    # Consumed above before this check on purpose: the realistic way another
-    # user arrives holding a token is that the link leaked, and a leaked link
-    # should be dead rather than still redeemable by the person it was for.
-    if ticket.user.strip().casefold() != user.strip().casefold():
-        logger.warning("Download token offered by a user it was not minted for")
-        return None
     return ticket
+
+
+def _consume_file(path: Path) -> None:
+    """Delete a file that has just been served, and forget any link left to it.
+
+    Called after the response has been sent and never before: the body is
+    streamed off this very file. A second ticket can point at the same path when
+    the tool was called twice for one attachment, so the revoke is not
+    bookkeeping, it is what stops the other link from later serving nothing.
+    """
+    try:
+        path.unlink()
+    except OSError:
+        # Already gone, or a permission problem worth seeing in the log. Either
+        # way the download itself succeeded, so there is nothing to fail here.
+        logger.warning("Could not delete %s after serving it", path)
+        return
+    _revoke({path})
+    _remove_if_empty(path.parent)
 
 
 def _revoke(paths: Set[Path]) -> None:
@@ -197,33 +230,92 @@ def _remove_if_empty(directory: Path) -> None:
         pass
 
 
+def sweep() -> List[Path]:
+    """Delete the downloads nobody fetched before their retention ran out.
+
+    Walks the filesystem rather than the ticket table, because the table is the
+    smaller of the two: a link expires after TICKET_TTL_SECONDS while the file
+    it named lives on, a restart empties the table entirely, and a tool call the
+    caller never followed up on leaves a file with no ticket at all. The
+    directory tree is the only complete record of what is on this disk.
+
+    Age is the file's mtime against the wall clock, not the monotonic clock the
+    tickets use: a file outlives the process that wrote it.
+    """
+    config = get_config()
+    retention = config.retention_seconds
+    root = config.attachment_dir
+    if retention is None or not root.is_dir():
+        return []
+
+    cutoff = time.time() - retention
+    removed: List[Path] = []
+    for path in root.rglob("*"):
+        try:
+            if not path.is_file() or path.stat().st_mtime > cutoff:
+                continue
+            path.unlink()
+        except OSError:
+            logger.warning("Could not delete the expired download %s", path)
+            continue
+        removed.append(path)
+
+    if removed:
+        _revoke(set(removed))
+        _prune_empty_dirs(root)
+        logger.info("Deleted %d expired download(s)", len(removed))
+    return removed
+
+
+def _prune_empty_dirs(root: Path) -> None:
+    """Remove the per-message and per-user directories left empty. Never root.
+
+    Deepest first, so emptying a message directory lets its user directory go in
+    the same pass. `root` itself stays: it is configuration, not something this
+    module created, and the next download needs it anyway.
+    """
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if path.is_dir():
+            _remove_if_empty(path)
+
+
+async def reap_expired_downloads() -> None:
+    """Sweep on a timer, for as long as the server runs.
+
+    A sweep on the next tool call would be simpler and would be wrong: nothing
+    says there will be a next call, and the file nobody came back for is exactly
+    the one that has to go. Started by the lifespan and cancelled with it.
+    """
+    while True:
+        try:
+            sweep()
+        except Exception:
+            # A failed sweep must not take the timer down with it: the next one
+            # would have cleaned up the same files anyway.
+            logger.exception("Download sweep failed")
+        await anyio.sleep(SWEEP_INTERVAL_SECONDS)
+
+
 def _refuse(message: str, status: int) -> PlainTextResponse:
     return PlainTextResponse(message, status_code=status)
 
 
 @mcp.custom_route(DOWNLOAD_ROUTE, methods=["GET"])
 async def download_attachment(request: Request) -> Response:
-    """Serve one attachment to the user the link was minted for, once."""
+    """Serve one attachment once, and take it off the server on the way out."""
     config = get_config()
-    policy = proxy_auth_policy(config)
-    if not config.downloads_enabled or policy is None:
+    if not config.downloads_enabled:
         return _refuse("Not found", 404)
     if request.method != "GET":
         # Starlette answers HEAD on a GET route by itself; refuse it rather than
         # let a probe burn the one fetch the link is good for.
         return _refuse("Use GET to fetch this file.", 405)
 
-    try:
-        user = policy.user_from_headers(request.headers)
-    except CredentialsError as e:
-        return _refuse(str(e), 403)
-
-    ticket = _take(request.path_params.get("token", ""), user)
+    ticket = _take(request.path_params.get("token", ""))
     if ticket is None:
         return _refuse(
-            "This download link is not valid: it has already been used, it has "
-            "expired, or it was issued for somebody else. Ask for the attachment "
-            "again to get a new one.",
+            "This download link is not valid: it has already been used, or it "
+            "has expired. Ask for the attachment again to get a new one.",
             404,
         )
     if not ticket.path.is_file():
@@ -231,7 +323,13 @@ async def download_attachment(request: Request) -> Response:
             "This attachment is no longer on the server. Ask for it again.", 410
         )
 
-    logger.info("Serving %s to %s", ticket.name, user)
+    # The user is logged rather than checked: the token was minted for them and
+    # the proxy asserts nothing on this route, so it is the record of whose
+    # mailbox a served file came out of, not a second gate.
+    logger.info("Serving %s, downloaded for %s", ticket.name, ticket.user)
     return FileResponse(
-        ticket.path, media_type=ticket.content_type, filename=ticket.name
+        ticket.path,
+        media_type=ticket.content_type,
+        filename=ticket.name,
+        background=BackgroundTask(_consume_file, ticket.path),
     )

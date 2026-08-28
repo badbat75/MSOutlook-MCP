@@ -1,12 +1,15 @@
 """Unit tests for outlook_mcp.downloads: getting a file to a remote caller.
 
-Three things have to hold, and none of them needs a network to check. A file
-one user downloaded must not appear in another's directory or be deletable by
-them. A download link must work exactly once, for the person it was minted for.
-And a caller must never be able to steer either operation with a path of its
+Four things have to hold, and none of them needs a network to check. A file one
+user downloaded must not appear in another's directory or be deletable by them.
+A download link must work exactly once, and serving it must take the file with
+it, since the link itself asks for no credential. A file nobody fetched must go
+by itself. And a caller must never be able to steer any of it with a path of its
 own: it names a message, the server names the file.
 """
 
+import os
+import time
 from pathlib import Path
 
 import anyio
@@ -64,18 +67,36 @@ def write(user, message_id, name, body=b"payload"):
     return path
 
 
-class _Request:
-    """The three things the route reads off a Starlette request."""
+def age(path, seconds):
+    """Backdate a file, the way the passage of time would."""
+    when = time.time() - seconds
+    os.utime(path, (when, when))
+    return path
 
-    def __init__(self, token, headers, method="GET"):
+
+class _Request:
+    """The two things the route reads off a Starlette request.
+
+    No headers: the route reads none. That is the point of the mode, and a
+    request object that cannot offer any is the cheapest way to keep it true.
+    """
+
+    def __init__(self, token, method="GET"):
         self.path_params = {"token": token}
-        self.headers = headers
         self.method = method
 
 
-def fetch(token, user=ADA, method="GET"):
-    headers = {"x-auth-email": user} if user is not None else {}
-    return anyio.run(downloads.download_attachment, _Request(token, headers, method))
+def fetch(token, method="GET"):
+    """Redeem a link the way a real server does, background task included.
+
+    Starlette runs response.background after the body has gone out, which is
+    where the file is deleted. Running it here rather than in the two tests that
+    look at the disk keeps every test on the real lifecycle.
+    """
+    response = anyio.run(downloads.download_attachment, _Request(token, method))
+    if response.background is not None:
+        anyio.run(response.background)
+    return response
 
 
 class TestWhereFilesLand:
@@ -128,7 +149,10 @@ class TestOfferingALink:
 
 
 class TestRedeemingALink:
-    def test_the_user_it_was_minted_for_gets_the_file(self, http):
+    def test_the_token_alone_fetches_the_file(self, http):
+        # No identity header, no bearer, nothing: an agent holding the link can
+        # GET it. That is the requirement, since the credential its MCP client
+        # uses to reach this server is one the agent never sees.
         path = write(ADA, MESSAGE, "invoice.pdf")
         token = downloads._mint(path, "invoice.pdf", "application/pdf", ADA)
 
@@ -145,21 +169,34 @@ class TestRedeemingALink:
         assert fetch(token).status_code == 200
         assert fetch(token).status_code == 404
 
-    def test_another_user_cannot_redeem_it(self, http):
-        # The one leak this whole mode exists to prevent: a link in a shared
-        # transcript must be worth nothing to the next reader.
+    def test_serving_it_deletes_the_file(self, http):
+        # What makes an unauthenticated link acceptable: by the time the answer
+        # holding it has been written, there is nothing left on the other end.
         path = write(ADA, MESSAGE, "invoice.pdf")
         token = downloads._mint(path, "invoice.pdf", "application/pdf", ADA)
 
-        assert fetch(token, user=BOB).status_code == 404
+        fetch(token)
 
-    def test_a_link_offered_to_the_wrong_user_is_burned(self, http):
+        assert not path.exists()
+
+    def test_the_message_directory_goes_with_the_last_file(self, http):
         path = write(ADA, MESSAGE, "invoice.pdf")
         token = downloads._mint(path, "invoice.pdf", "application/pdf", ADA)
 
-        fetch(token, user=BOB)
+        fetch(token)
 
-        assert fetch(token, user=ADA).status_code == 404
+        assert not path.parent.exists()
+
+    def test_a_second_link_to_the_served_file_is_revoked(self, http):
+        # Two calls for one attachment mint two tickets over the same path. The
+        # second must not survive to promise a file that is gone.
+        path = write(ADA, MESSAGE, "invoice.pdf")
+        first = downloads._mint(path, "invoice.pdf", "application/pdf", ADA)
+        second = downloads._mint(path, "invoice.pdf", "application/pdf", ADA)
+
+        fetch(first)
+
+        assert fetch(second).status_code == 404
 
     def test_an_expired_link_is_refused(self, http, clock):
         path = write(ADA, MESSAGE, "invoice.pdf")
@@ -178,15 +215,6 @@ class TestRedeemingALink:
 
         assert fetch(token).status_code == 410
 
-    def test_a_request_without_the_identity_header_is_refused(self, http):
-        path = write(ADA, MESSAGE, "invoice.pdf")
-        token = downloads._mint(path, "invoice.pdf", "application/pdf", ADA)
-
-        response = fetch(token, user=None)
-
-        assert response.status_code == 403
-        assert fetch(token).status_code == 200  # not consumed by the refusal
-
     def test_head_does_not_burn_the_link(self, http):
         # Starlette answers HEAD on a GET route by itself, and a preflight probe
         # must not spend the one fetch the link is good for.
@@ -197,9 +225,80 @@ class TestRedeemingALink:
         assert fetch(token).status_code == 200
 
     def test_stdio_serves_nothing_at_all(self, stdio):
-        # No proxy in front, so no identity: the route must not exist.
+        # Nobody is proxying, and there is no public URL to have handed out a
+        # link in the first place: the route must not exist.
         token = downloads._mint(Path("f.pdf"), "f.pdf", "application/pdf", ADA)
         assert fetch(token).status_code == 404
+
+
+class TestRetention:
+    """What happens to a file nobody ever fetched."""
+
+    def test_an_old_file_is_swept(self, http):
+        old = age(write(ADA, MESSAGE, "invoice.pdf"), http.retention_seconds + 60)
+
+        assert downloads.sweep() == [old]
+        assert not old.exists()
+
+    def test_a_fresh_file_is_left_alone(self, http):
+        fresh = write(ADA, MESSAGE, "invoice.pdf")
+
+        assert downloads.sweep() == []
+        assert fresh.exists()
+
+    def test_the_directories_go_with_the_files(self, http):
+        old = age(write(ADA, MESSAGE, "invoice.pdf"), http.retention_seconds + 60)
+        message = old.parent
+        user = message.parent
+
+        downloads.sweep()
+
+        assert not message.exists()
+        assert not user.exists()
+        # The configured root is not this module's to remove, and the next
+        # download needs it.
+        assert http.attachment_dir.is_dir()
+
+    def test_a_link_to_a_swept_file_is_revoked(self, http):
+        old = age(write(ADA, MESSAGE, "invoice.pdf"), http.retention_seconds + 60)
+        token = downloads._mint(old, "invoice.pdf", "application/pdf", ADA)
+
+        downloads.sweep()
+
+        assert fetch(token).status_code == 404
+
+    def test_a_directory_of_a_still_wanted_file_survives(self, http):
+        old = age(write(ADA, MESSAGE, "old.pdf"), http.retention_seconds + 60)
+        fresh = write(ADA, MESSAGE, "new.pdf")
+
+        downloads.sweep()
+
+        assert not old.exists()
+        assert fresh.exists()
+
+    def test_retention_can_be_turned_off(self, monkeypatch, tmp_path):
+        config = ServerConfig(
+            transport="http",
+            public_url="https://outlook-mcp.example.com/",
+            download_path=str(tmp_path),
+            retention_minutes=0,
+        )
+        monkeypatch.setattr(downloads, "get_config", lambda: config)
+        old = age(write(ADA, MESSAGE, "invoice.pdf"), 10 * 24 * 3600)
+
+        assert downloads.sweep() == []
+        assert old.exists()
+
+    def test_stdio_downloads_are_never_swept(self, stdio):
+        # The file the tool wrote is the answer, in the caller's own download
+        # directory. Deleting it would be deleting the user's file.
+        old = age(write(None, MESSAGE, "invoice.pdf"), 10 * 24 * 3600)
+
+        assert downloads.sweep() == []
+        assert old.exists()
+
+    def test_sweeping_an_empty_deployment_is_not_an_error(self, http):
+        assert downloads.sweep() == []
 
 
 class TestTheTableIsBounded:

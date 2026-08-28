@@ -318,6 +318,33 @@ class TestAttachmentsSection:
         assert "~" not in str(load_config(str(path)).attachment_dir)
 
 
+class TestRetention:
+    """How long a download nobody fetched stays on the server."""
+
+    def test_an_hour_by_default(self):
+        assert ServerConfig(transport="http").retention_seconds == 3600
+
+    def test_a_configured_number_of_minutes(self, tmp_path):
+        path = write_config(tmp_path, "[attachments]\nretention_minutes = 5\n")
+        config = load_config(str(path))
+        assert config.retention_minutes == 5
+
+    def test_zero_means_never(self):
+        assert ServerConfig(transport="http", retention_minutes=0).retention_seconds is None
+
+    def test_stdio_downloads_never_expire(self):
+        # There the file the tool wrote is the answer, in the caller's own
+        # download directory: an expiry would delete the user's file.
+        assert ServerConfig().retention_seconds is None
+        assert ServerConfig(retention_minutes=5).retention_seconds is None
+
+    @pytest.mark.parametrize("value", ["-1", '"60"', "true", "1.5"])
+    def test_a_bad_value_is_refused(self, tmp_path, value):
+        path = write_config(tmp_path, f"[attachments]\nretention_minutes = {value}\n")
+        with pytest.raises(ConfigError, match="retention_minutes"):
+            load_config(str(path))
+
+
 class TestHttpIsRefusedOffLoopback:
     """The identity header is only believable if the proxy is the only way in.
 
