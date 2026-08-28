@@ -1,4 +1,10 @@
-mcp[cli]>=2.1.0
-httpx>=0.27.0
-msal>=1.28.0
-pydantic>=2.0.0
+# Dependencies live in pyproject.toml; this file only points pip at it, so the
+# two can never drift. Installs the project in editable mode together with its
+# runtime dependencies:
+#
+#     pip install -r requirements.txt
+#
+# Add the dev extra to get pytest for the unit tests:
+#
+#     pip install -e ".[dev]"
+-e .

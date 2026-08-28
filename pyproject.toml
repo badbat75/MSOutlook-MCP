@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "outlook-mcp"
 version = "1.0.0"
@@ -10,5 +14,15 @@ dependencies = [
     "pydantic>=2.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 outlook-mcp = "outlook_mcp.server:main"
+
+# Only the package ships. Without this, setuptools' flat-layout auto-discovery
+# also finds outlook_mcp_server.py and outlook_mcp_auth.py at the top level and
+# refuses to build ("Multiple top-level packages discovered in a flat-layout"):
+# those two are entry-point scripts for a checkout, not installable modules.
+[tool.setuptools.packages.find]
+include = ["outlook_mcp*"]
