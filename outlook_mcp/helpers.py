@@ -1,11 +1,10 @@
 """Formatting helpers and utility functions."""
 
 import base64
-import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import httpx
 
@@ -164,33 +163,6 @@ def get_day_of_week(iso_date: str) -> str:
         return "monday"
 
 
-# Attachment handling constants
-DEFAULT_ATTACHMENT_DIR = Path.home() / "Downloads" / "outlook_attachments"
-
-
-def attachment_download_dir() -> Path:
-    """Directory attachments are written to: OUTLOOK_DOWNLOAD_PATH, or a default.
-
-    Resolved on every call rather than at import time, because the entry point
-    merges the project .env into the environment and may do so after this
-    module has been imported. Server-side on purpose: in HTTP mode a remote
-    caller must never choose where the server writes files.
-    """
-    configured = os.environ.get("OUTLOOK_DOWNLOAD_PATH", "").strip()
-    return Path(configured).expanduser() if configured else DEFAULT_ATTACHMENT_DIR
-
-
-MAX_INLINE_SIZE_MB = 10
-VIEWABLE_IMAGE_TYPES = {
-    "image/png", "image/jpeg", "image/jpg", "image/gif",
-    "image/bmp", "image/webp", "image/svg+xml"
-}
-ANALYZABLE_TYPES = {
-    "application/pdf", "text/plain", "text/html", "text/csv",
-    "application/json", "application/xml", "text/xml"
-}
-
-
 def format_attachment_summary(attachment: dict) -> str:
     """Format an attachment metadata for display.
 
@@ -244,40 +216,19 @@ def format_attachment_summary(attachment: dict) -> str:
     )
 
 
-def should_save_to_disk(content_type: str, size_bytes: int, force_disk: bool) -> bool:
-    """Determine if an attachment should be saved to disk vs returned as base64.
-
-    Args:
-        content_type: MIME type of the attachment
-        size_bytes: Size in bytes
-        force_disk: User-requested force save to disk
-
-    Returns:
-        bool: Always True - base64 streaming is too heavy for MCP, save everything to disk
-    """
-    # Always save to disk - base64 data URLs are too heavy for MCP protocol
-    return True
-
-
-def create_data_url(content_type: str, base64_content: str) -> str:
-    """Create a data URL from base64 content.
-
-    Args:
-        content_type: MIME type
-        base64_content: Base64-encoded content
-
-    Returns:
-        str: data URL that Claude can render
-    """
-    return f"data:{content_type};base64,{base64_content}"
-
-
-def save_attachment_to_disk(filename: str, content_bytes: bytes) -> str:
+def save_attachment_to_disk(filename: str, content_bytes: bytes, directory: Path) -> str:
     """Save attachment bytes to disk.
+
+    Every attachment is written to a file: a base64 data URL of a real
+    attachment is far too heavy to send back through MCP, and the caller is
+    handed a path or a download link instead.
 
     Args:
         filename: Original filename
         content_bytes: Raw file bytes
+        directory: Where to write it, from downloads.message_dir(). Passed in
+            rather than resolved here: which directory a file belongs in is a
+            question about who is asking, which this module cannot see.
 
     Returns:
         str: Absolute path to saved file
@@ -285,9 +236,10 @@ def save_attachment_to_disk(filename: str, content_bytes: bytes) -> str:
     Raises:
         OSError: If save fails
     """
-    # Create directory if needed
-    download_dir = attachment_download_dir()
-    download_dir.mkdir(parents=True, exist_ok=True)
+    # 0o700 so that on a shared host the mail of one service account is not
+    # readable by every other. Only the leaf is created with that mode, which is
+    # enough: entering it is what a reader would need.
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # Sanitize filename (remove path traversal attempts)
     safe_filename = Path(filename).name
@@ -295,12 +247,12 @@ def save_attachment_to_disk(filename: str, content_bytes: bytes) -> str:
         safe_filename = "attachment"
 
     # Handle duplicates
-    target_path = download_dir / safe_filename
+    target_path = directory / safe_filename
     counter = 1
     while target_path.exists():
         stem = Path(safe_filename).stem
         suffix = Path(safe_filename).suffix
-        target_path = download_dir / f"{stem}_{counter}{suffix}"
+        target_path = directory / f"{stem}_{counter}{suffix}"
         counter += 1
 
     # Write file

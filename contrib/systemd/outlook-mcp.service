@@ -1,0 +1,85 @@
+# Outlook MCP server, streamable HTTP behind a reverse proxy.
+#
+# scripts/deploy.sh renders this file: each at-sign delimited name below is
+# replaced with a value from that deploy, and the result installed as
+# /etc/systemd/system/<name>.service. To install it by hand instead, copy it
+# and substitute those names yourself. No such name may appear in this comment,
+# or the deploy reports it as one it failed to substitute.
+#
+# Only the HTTP transport belongs under systemd. A stdio server is spawned by
+# whatever MCP host talks to it, one process per client, on that host's
+# schedule: there is nothing for a service manager to supervise.
+
+[Unit]
+Description=Outlook MCP server (Microsoft Graph, streamable HTTP)
+Documentation=file://@DIR@/app/docs/SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/venv/bin/outlook-mcp --config @CONFIG@
+SyslogIdentifier=@SERVICE_NAME@
+
+# A deployed configuration names both directories it writes to, so this is not
+# load-bearing. It is here so that a "~" left anywhere, now or later, resolves
+# inside the data directory instead of wherever this user's passwd entry points,
+# which for a shared service account is somewhere else entirely.
+Environment=HOME=@DATA_DIR@
+Environment=PYTHONUNBUFFERED=1
+
+Restart=on-failure
+RestartSec=5s
+
+# Exit code 2 is a configuration error: an unreadable outlook_mcp.toml, an
+# unknown transport, a bind address that is not loopback. Restarting cannot fix
+# any of them, so fail visibly instead of looping every five seconds.
+RestartPreventExitStatus=2
+
+# --- Sandbox ----------------------------------------------------------------
+# The service binds loopback, reads one config file and writes token caches
+# under its own home. It needs nothing else.
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Token caches are written 0600 by the server itself; this covers everything
+# else it might create, such as the attachment download directory.
+UMask=0077
+
+# ProtectHome stays off on purpose: the data directory is this service's HOME,
+# and hiding it would break every mailbox with an error that points nowhere near
+# the cause. ProtectSystem=strict already makes the rest of the filesystem
+# read-only, so this one directory is the entire writable surface: token caches,
+# and the attachments the tools download.
+ProtectHome=no
+ReadWritePaths=@DATA_DIR@
+
+# AF_NETLINK is not optional: glibc's resolver uses it to enumerate local
+# addresses, so without it name resolution fails for graph.microsoft.com.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

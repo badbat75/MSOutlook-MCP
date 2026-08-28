@@ -278,7 +278,21 @@ class GetAttachmentInput(BaseModel):
 
     message_id: str = Field(..., description="The message ID containing the attachment", min_length=1)
     attachment_id: str = Field(..., description="The attachment ID to download", min_length=1)
-    save_to_disk: bool = Field(
-        default=False,
-        description="Ignored - all attachments are always saved to disk (base64 streaming is too heavy for MCP protocol). Path configurable via OUTLOOK_DOWNLOAD_PATH env var (default: ~/Downloads/outlook_attachments/)"
+
+
+class DeleteAttachmentFilesInput(BaseModel):
+    """Input for deleting the attachment files downloaded from one message."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    message_id: str = Field(
+        ...,
+        description="The message whose downloaded attachment files should be removed from the server's filesystem",
+        min_length=1,
+    )
+    filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Delete only this file, named as outlook_get_attachment reported it. "
+            "Omit to delete everything downloaded from this message."
+        ),
     )

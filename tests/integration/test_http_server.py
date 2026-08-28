@@ -2,26 +2,25 @@ r"""
 Outlook MCP Server - HTTP transport integration test
 =====================================================
 Starts the server with a temporary outlook_mcp.toml (transport = "http") and
-talks to it over streamable HTTP with plain httpx, sending the Azure AD
-credentials as X-Outlook-* headers on every request. The server subprocess
-gets NO OUTLOOK_* variables, so a passing run proves the headers are the only
-credential source in HTTP mode.
+talks to it over streamable HTTP with plain httpx, sending an X-Auth-Email
+header on every request, exactly as the reverse proxy in front of a real
+deployment would. No credential is sent: a passing run proves the server serves
+one enrolled user's mailbox off its own configured app registration.
 
-Requires a valid token cache (run outlook_mcp_auth.py once) and the
-OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET / OUTLOOK_TENANT_ID variables in the
-*test* environment, which are forwarded as headers.
+Requires the app registration in the project outlook_mcp.toml and a valid token
+cache (run outlook_mcp_auth.py once). The test enrolls a throwaway identity by
+copying that cache to the per-user path, and removes it again afterwards.
 
 Talks to the real Microsoft Graph. Run it by hand; pytest only collects
 tests/unit.
 
 Usage:
-    . .\scripts\setup-env.ps1
     python tests\integration\test_http_server.py
     python tests\integration\test_http_server.py --verbose
 """
 
 import json
-import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -38,14 +37,17 @@ if not VENV_PYTHON.exists():
     VENV_PYTHON = PROJECT_ROOT / "venv" / "bin" / "python"
 
 sys.path.insert(0, str(PROJECT_ROOT))
-from outlook_mcp.env import load_project_env  # noqa: E402
+from outlook_mcp.auth import TOKEN_CACHE_PATH, user_cache_path  # noqa: E402
+from outlook_mcp.config import load_config  # noqa: E402
 
 STARTUP_TIMEOUT = 30  # seconds to wait for the port to open
 REQUEST_TIMEOUT = 45
 
-HEADER_CLIENT_ID = "X-Outlook-Client-Id"
-HEADER_CLIENT_SECRET = "X-Outlook-Client-Secret"
-HEADER_TENANT_ID = "X-Outlook-Tenant-Id"
+USER_HEADER = "X-Auth-Email"
+# The identity the proxy would assert. Arbitrary: what makes it work is the
+# cache file the test puts at its per-user path, not the address itself.
+TEST_USER = "integration-test@localhost"
+UNKNOWN_USER = "nobody@localhost"
 
 
 def get_python():
@@ -160,40 +162,56 @@ class HttpMCPClient:
         return "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
 
 
+def enroll_test_user() -> Path:
+    """Give TEST_USER the grant the shared cache already holds.
+
+    The per-user cache is an ordinary MSAL cache at a path derived from the
+    address, so copying is all "enrolling" means here. Returns the path so the
+    caller can remove it again: this test must not leave a mailbox authorized
+    under an identity nobody owns.
+    """
+    if not TOKEN_CACHE_PATH.exists():
+        print(f"ERROR: no token cache at {TOKEN_CACHE_PATH}. Run outlook_mcp_auth.py first.")
+        sys.exit(1)
+    path = user_cache_path(TEST_USER)
+    if path.exists():
+        print(f"ERROR: {path} already exists; refusing to overwrite it.")
+        sys.exit(1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(TOKEN_CACHE_PATH, path)
+    return path
+
+
 def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
-    # The credentials this test sends as headers: read from the project .env,
-    # the same file the server would read if it were allowed to (it is not,
-    # see the empty --env-file below).
-    load_project_env()
-    creds = {
-        HEADER_CLIENT_ID: os.environ.get("OUTLOOK_CLIENT_ID", ""),
-        HEADER_CLIENT_SECRET: os.environ.get("OUTLOOK_CLIENT_SECRET", ""),
-        HEADER_TENANT_ID: os.environ.get("OUTLOOK_TENANT_ID", "common"),
-    }
-    if not creds[HEADER_CLIENT_ID] or not creds[HEADER_CLIENT_SECRET]:
-        print("ERROR: OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET are not set and not in the project .env")
+    # The app registration the server will run as, from the project's own
+    # configuration file: the test copies it into the temporary one so the
+    # subprocess needs nothing from this process.
+    config = load_config()
+    if not config.has_credentials:
+        print("ERROR: no [credentials] in outlook_mcp.toml; the server has nothing to run as.")
         sys.exit(1)
 
     port = free_port()
     url = f"http://127.0.0.1:{port}/mcp"
-
-    # Server environment: everything except the Outlook credentials, so that
-    # the only way the tools can work is through the request headers.
-    server_env = {k: v for k, v in os.environ.items() if not k.startswith("OUTLOOK_")}
+    identity = {USER_HEADER: TEST_USER}
+    user_cache = enroll_test_user()
 
     with tempfile.TemporaryDirectory() as tmp:
         config_path = Path(tmp) / "outlook_mcp.toml"
         config_path.write_text(
-            f'[server]\ntransport = "http"\nbind_host = "127.0.0.1"\nbind_port = {port}\n',
+            f'[server]\ntransport = "http"\nbind_host = "127.0.0.1"\nbind_port = {port}\n'
+            f'\n[credentials]\n'
+            f'client_id = "{config.client_id}"\n'
+            f'client_secret = "{config.client_secret}"\n'
+            f'tenant_id = "{config.tenant_id}"\n'
+            # Turns on the attachment download route, which check_download_route
+            # then probes. Also turns on browser enrollment, which nothing here
+            # visits.
+            f'\n[auth]\npublic_url = "http://127.0.0.1:{port}"\n',
             encoding="utf-8",
         )
-        # Stripping OUTLOOK_* from the environment is not enough on its own:
-        # the server reads the project .env by itself. Point it at an empty one
-        # so the request headers really are the only credential source.
-        env_path = Path(tmp) / "empty.env"
-        env_path.write_text("# intentionally empty\n", encoding="utf-8")
 
         print("=" * 60)
         print("Outlook MCP Server - HTTP Transport Test")
@@ -202,19 +220,15 @@ def main():
         print(f"Server:  {SERVER_SCRIPT}")
         print(f"URL:     {url}")
         print(f"Config:  {config_path}")
+        print(f"User:    {TEST_USER} ({user_cache.name})")
         print()
 
         proc = subprocess.Popen(
-            [
-                get_python(), str(SERVER_SCRIPT),
-                "--config", str(config_path),
-                "--env-file", str(env_path),
-            ],
+            [get_python(), str(SERVER_SCRIPT), "--config", str(config_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            env=server_env,
         )
 
         passed = failed = 0
@@ -223,14 +237,16 @@ def main():
 
             checks = [
                 ("Initialize + tools/list", check_initialize),
-                ("Get Profile (creds via headers)", check_profile_with_headers),
-                ("Missing headers -> clear error", check_missing_headers),
-                ("List Mail (creds via headers)", check_list_mail),
+                ("Get Profile (identity from the proxy)", check_profile_as_user),
+                ("Missing identity header -> clear error", check_missing_identity),
+                ("Unenrolled user -> refused, not app-only", check_unenrolled_user),
+                ("Attachment route -> refuses what it did not mint", check_download_route),
+                ("List Mail (identity from the proxy)", check_list_mail),
             ]
             for i, (name, fn) in enumerate(checks, 1):
                 print(f"  [{i}/{len(checks)}] {name}...", end=" ", flush=True)
                 try:
-                    detail = fn(url, creds, verbose)
+                    detail = fn(url, identity, verbose)
                     print("PASS")
                     if verbose and detail:
                         print(f"        {str(detail)[:300]}")
@@ -248,14 +264,15 @@ def main():
                 stderr = proc.stderr.read()
                 if stderr:
                     print("\n[server stderr]\n" + stderr[-3000:])
+            user_cache.unlink(missing_ok=True)
 
     print()
     print(f"Results: {passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
 
 
-def check_initialize(url, creds, verbose):
-    client = HttpMCPClient(url, creds, verbose)
+def check_initialize(url, identity, verbose):
+    client = HttpMCPClient(url, identity, verbose)
     try:
         info = client.initialize()
         assert info.get("serverInfo", {}).get("name") == "MS_Outlook_MCP", info
@@ -267,8 +284,8 @@ def check_initialize(url, creds, verbose):
         client.close()
 
 
-def check_profile_with_headers(url, creds, verbose):
-    client = HttpMCPClient(url, creds, verbose)
+def check_profile_as_user(url, identity, verbose):
+    client = HttpMCPClient(url, identity, verbose)
     try:
         client.initialize()
         text = client.call_tool("outlook_get_profile", {"params": {}})
@@ -279,20 +296,52 @@ def check_profile_with_headers(url, creds, verbose):
         client.close()
 
 
-def check_missing_headers(url, creds, verbose):
-    client = HttpMCPClient(url, {}, verbose)  # no X-Outlook-* headers at all
+def check_missing_identity(url, identity, verbose):
+    client = HttpMCPClient(url, {}, verbose)  # no identity header at all
     try:
         client.initialize()
         text = client.call_tool("outlook_get_profile", {"params": {}})
         assert text.startswith("Error"), f"expected an error, got: {text[:200]}"
-        assert HEADER_CLIENT_ID in text and HEADER_CLIENT_SECRET in text, text
+        assert USER_HEADER in text, text
         return text[:120]
     finally:
         client.close()
 
 
-def check_list_mail(url, creds, verbose):
-    client = HttpMCPClient(url, creds, verbose)
+def check_unenrolled_user(url, identity, verbose):
+    # The dangerous fallback: with one app registration for everyone, an
+    # unenrolled caller must not slide through to client credentials and get a
+    # token that acts as the application.
+    client = HttpMCPClient(url, {USER_HEADER: UNKNOWN_USER}, verbose)
+    try:
+        client.initialize()
+        text = client.call_tool("outlook_get_profile", {"params": {}})
+        assert text.startswith("Error"), f"expected an error, got: {text[:200]}"
+        assert UNKNOWN_USER in text, text
+        return text[:120]
+    finally:
+        client.close()
+
+
+def check_download_route(url, identity, verbose):
+    # The route is mounted, runs the same identity policy the tools do, and
+    # hands out nothing it did not mint. Minting one for real needs a message
+    # with an attachment, which this test does not create.
+    base = url.rsplit("/mcp", 1)[0]
+    with httpx.Client(timeout=REQUEST_TIMEOUT) as http:
+        anonymous = http.get(f"{base}/attachments/not-a-real-token")
+        assert anonymous.status_code == 403, (
+            f"expected 403 without the identity header, got {anonymous.status_code}"
+        )
+        unknown = http.get(f"{base}/attachments/not-a-real-token", headers=identity)
+        assert unknown.status_code == 404, (
+            f"expected 404 for an unknown token, got {unknown.status_code}"
+        )
+    return "403 without the header, 404 for an unknown token"
+
+
+def check_list_mail(url, identity, verbose):
+    client = HttpMCPClient(url, identity, verbose)
     try:
         client.initialize()
         text = client.call_tool("outlook_list_mail", {"params": {"folder": "inbox", "top": 3}})

@@ -8,18 +8,15 @@ breaks that circle.
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from mcp.server.mcpserver import MCPServer
 
-from .config import ServerConfig
+from .config import CONFIG_FILENAME, ServerConfig
 from .credentials import (
-    ENV_CLIENT_ID,
-    ENV_CLIENT_SECRET,
-    HEADER_CLIENT_ID,
-    HEADER_CLIENT_SECRET,
-    HEADER_TENANT_ID,
     GraphClientPool,
-    credentials_from_env,
+    ProxyAuthPolicy,
+    credentials_from_config,
 )
 
 logger = logging.getLogger("outlook_mcp")
@@ -41,24 +38,35 @@ def set_config(config: ServerConfig) -> None:
     _config = config
 
 
+def proxy_auth_policy(config: ServerConfig) -> Optional[ProxyAuthPolicy]:
+    """The identity policy for HTTP requests, or None over stdio."""
+    if not config.is_http:
+        return None
+    return ProxyAuthPolicy(user_header=config.user_header)
+
+
 @asynccontextmanager
 async def app_lifespan(app):
     """Create the Graph client pool on startup, close every client on shutdown."""
-    pool = GraphClientPool()
-    env_creds = credentials_from_env()
+    pool = GraphClientPool(_config.cache_directory)
+    credentials = credentials_from_config(_config)
+    proxy_auth = proxy_auth_policy(_config)
 
-    if _config.is_http:
+    if proxy_auth is not None:
         logger.info(
-            "HTTP mode: credentials are taken from the %s / %s / %s request headers",
-            HEADER_CLIENT_ID, HEADER_CLIENT_SECRET, HEADER_TENANT_ID,
+            "HTTP mode: the mailbox is chosen by the %s header of each request, "
+            "served with the configured app registration and one token cache per "
+            "user. Listening on %s only.",
+            proxy_auth.user_header, _config.bind_host,
         )
-    elif env_creds is None:
+    if credentials is None:
         logger.warning(
-            "%s and %s must be set. The server will start but all tools will fail "
-            "until configured.", ENV_CLIENT_ID, ENV_CLIENT_SECRET,
+            "No [credentials] in %s: the server will start but every tool will "
+            "fail until client_id and client_secret are configured.",
+            _config.source or CONFIG_FILENAME,
         )
 
-    yield {"pool": pool, "env_credentials": env_creds}
+    yield {"pool": pool, "credentials": credentials, "proxy_auth": proxy_auth}
 
     await pool.close_all()
 

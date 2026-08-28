@@ -4,7 +4,7 @@ This guide is for setting up the Outlook MCP Server with **Personal Microsoft Ac
 
 ## ⚠️ CRITICAL: Account Type Configuration
 
-**IMPORTANT:** When using `OUTLOOK_TENANT_ID=common`, you MUST configure your Azure app registration with:
+**IMPORTANT:** When using `tenant_id = "common"`, you MUST configure your Azure app registration with:
 
 ✅ **"Accounts in any organizational directory and personal Microsoft accounts"**
 
@@ -24,7 +24,7 @@ with 'Consumer' as the user audience.
 
 ## Key Differences for Personal Accounts
 
-- Use `OUTLOOK_TENANT_ID=common` instead of a specific tenant ID
+- Use `tenant_id = "common"` instead of a specific tenant ID
 - No admin consent required (users consent individually)
 - Some enterprise-only features may not be available
 - App must support "All" account types, not just "Consumer"
@@ -56,7 +56,7 @@ with 'Consumer' as the user audience.
 After registration, you'll see the Overview page:
 
 1. Copy the **Application (client) ID** (a GUID like `12345678-1234-1234-1234-123456789abc`)
-2. Save this for your `.env` file as `OUTLOOK_CLIENT_ID`
+2. Save this for `outlook_mcp.toml` as `[credentials].client_id`
 
 ### 3. Create Client Secret
 
@@ -66,7 +66,7 @@ After registration, you'll see the Overview page:
 4. Choose expiration period (recommend 24 months)
 5. Click **Add**
 6. **IMPORTANT:** Copy the **Value** (not the Secret ID) immediately - you won't be able to see it again
-7. Save this for your `.env` file as `OUTLOOK_CLIENT_SECRET`
+7. Save this for `outlook_mcp.toml` as `[credentials].client_secret`
 
 ### 4. Configure API Permissions
 
@@ -85,17 +85,19 @@ After registration, you'll see the Overview page:
 
 **Note:** Admin consent is NOT required for personal accounts. Users will consent when they first log in.
 
-### 5. Configure Environment Variables
+### 5. Configure the Server
 
-Fill in your `.env` as described in [SETUP.md, step 3](SETUP.md#3-configure-the-credentials):
+Fill in `outlook_mcp.toml` as described in
+[SETUP.md, step 3](SETUP.md#3-configure-the-server):
 
-```ini
-OUTLOOK_CLIENT_ID=your-application-client-id-from-step-2
-OUTLOOK_CLIENT_SECRET=your-client-secret-value-from-step-3
-OUTLOOK_TENANT_ID=common
+```toml
+[credentials]
+client_id = "your-application-client-id-from-step-2"
+client_secret = "your-client-secret-value-from-step-3"
+tenant_id = "common"
 ```
 
-**Critical:** For personal accounts, always use `OUTLOOK_TENANT_ID=common`.
+**Critical:** For personal accounts, always use `tenant_id = "common"`.
 Any other value produces `AADSTS50020`, explained in the troubleshooting
 section below.
 
@@ -107,7 +109,7 @@ python outlook_mcp_auth.py --no-browser   # headless / SSH
 python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 ```
 
-The script reads the `.env` itself, so nothing needs loading first.
+The script reads `outlook_mcp.toml` itself, so nothing needs loading first.
 
 ### 7. Sign In with Your Personal Account
 
@@ -178,15 +180,7 @@ Press `Ctrl+C` to stop the server when testing is complete.
 
 Use headless mode:
 
-**Windows:**
-```powershell
-. .\scripts\setup-env.ps1
-python outlook_mcp_auth.py --no-browser
-```
-
-**macOS/Linux:**
 ```bash
-source ./scripts/setup-env.sh
 python outlook_mcp_auth.py --no-browser
 ```
 
@@ -245,48 +239,41 @@ with 'All' to use /common/ endpoint.
 3. Under **Supported account types**, change to:
    - ✅ **"Accounts in any organizational directory and personal Microsoft accounts"**
 4. Click **Save**
-5. Run the setup script then re-authorize:
-   - **Windows:** `. .\scripts\setup-env.ps1` then `python outlook_mcp_auth.py`
-   - **macOS/Linux:** `source ./scripts/setup-env.sh` then `python outlook_mcp_auth.py`
+5. Re-authorize: `python outlook_mcp_auth.py`
 
 **Solution - Option 2: Create New App**
 
 1. Delete the current app registration (or keep it for reference)
 2. Follow the setup guide from Step 1, making sure to select:
    - ✅ "Accounts in any organizational directory and personal Microsoft accounts"
-3. Update your `.env` file with the new Client ID and Secret
-4. Run the setup script then re-authorize:
-   - **Windows:** `. .\scripts\setup-env.ps1` then `python outlook_mcp_auth.py`
-   - **macOS/Linux:** `source ./scripts/setup-env.sh` then `python outlook_mcp_auth.py`
+3. Update `[credentials]` in `outlook_mcp.toml` with the new Client ID and Secret
+4. Re-authorize: `python outlook_mcp_auth.py`
 
 ---
 
 ### Error: "AADSTS50020: User account from identity provider does not exist in tenant"
 
-**Cause:** You're using a personal account but `OUTLOOK_TENANT_ID` is set to a specific tenant ID instead of "common".
+**Cause:** You're using a personal account but `tenant_id` is set to a specific tenant ID instead of "common".
 
 **Solution:**
-```ini
-# In your .env file, change to:
-OUTLOOK_TENANT_ID=common
+```toml
+# In outlook_mcp.toml, change to:
+[credentials]
+tenant_id = "common"
 ```
 
-Then reload and re-run:
-- **Windows:** `. .\scripts\setup-env.ps1` and `python outlook_mcp_auth.py`
-- **macOS/Linux:** `source ./scripts/setup-env.sh` and `python outlook_mcp_auth.py`
+Then re-run `python outlook_mcp_auth.py`.
 
 ### Error: "AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'"
 
-**Cause:** The client secret is missing or incorrect in your `.env` file.
+**Cause:** The client secret is missing or incorrect in `outlook_mcp.toml`.
 
 **Solution:**
 1. Go to Azure Portal → Your app → Certificates & secrets
 2. Create a new client secret (the old one may have expired)
 3. Copy the **Value** (not Secret ID)
-4. Update `OUTLOOK_CLIENT_SECRET` in `.env`
-5. Reload:
-   - **Windows:** `. .\scripts\setup-env.ps1`
-   - **macOS/Linux:** `source ./scripts/setup-env.sh`
+4. Update `[credentials].client_secret` in `outlook_mcp.toml`
+5. Restart the server
 
 ### Error: "AADSTS700016: Application with identifier '...' was not found in the directory"
 
@@ -295,10 +282,8 @@ Then reload and re-run:
 **Solution:**
 1. Go to Azure Portal → App registrations → Your app → Overview
 2. Copy the correct **Application (client) ID**
-3. Update `OUTLOOK_CLIENT_ID` in `.env`
-4. Reload:
-   - **Windows:** `. .\scripts\setup-env.ps1`
-   - **macOS/Linux:** `source ./scripts/setup-env.sh`
+3. Update `[credentials].client_id` in `outlook_mcp.toml`
+4. Restart the server
 
 ### Error: "AADSTS50011: The redirect URI '...' specified in the request does not match"
 
@@ -343,9 +328,8 @@ Once setup is complete:
 
 1. **Configure Claude Desktop** - See [SETUP.md](SETUP.md#7-connect-a-client)
 2. **Test with Claude** - Try commands like "Show me my unread emails"
-3. **Daily Usage** - Nothing to load: the server reads the `.env` itself. The
-   `scripts/setup-env` helpers are only for putting the same variables, and the
-   activated venv, into your own shell.
+3. **Daily Usage** - Nothing to load: the server reads `outlook_mcp.toml` itself,
+   from the project root, whatever the working directory is.
 
 ## Reference
 
@@ -354,7 +338,7 @@ Once setup is complete:
 | Setting | Required Value | ❌ Wrong Value |
 |---------|---------------|---------------|
 | **Azure: Supported account types** | ✅ "Accounts in any organizational directory and personal Microsoft accounts" | ❌ "Personal Microsoft accounts only" |
-| **OUTLOOK_TENANT_ID** | `common` | Specific tenant GUID |
+| **`[credentials].tenant_id`** | `common` | Specific tenant GUID |
 | **Redirect URI Type** | Web | Public client/native |
 | **Redirect URI** | `http://localhost:5000/callback` | Any other URL |
 | **Account Types Supported** | @outlook.com, @hotmail.com, @live.com, etc. | N/A |

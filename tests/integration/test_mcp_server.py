@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 SERVER_SCRIPT = PROJECT_ROOT / "outlook_mcp_server.py"
 
 sys.path.insert(0, str(PROJECT_ROOT))
-from outlook_mcp.env import load_project_env  # noqa: E402
+from outlook_mcp.config import CONFIG_FILENAME, load_config  # noqa: E402
 
 
 def get_python():
@@ -434,13 +434,11 @@ def main():
     print(f"Verbose: {verbose}")
     print()
 
-    # Same .env the server under test will read, so running this needs no
-    # separate shell setup step.
-    load_project_env()
-    for var in ("OUTLOOK_CLIENT_ID", "OUTLOOK_CLIENT_SECRET", "OUTLOOK_TENANT_ID"):
-        if not os.environ.get(var):
-            print(f"ERROR: {var} is not set and not in the project .env")
-            sys.exit(1)
+    # Same configuration file the server under test will read, so a missing app
+    # registration is reported here rather than as a failure in every test.
+    if not load_config().has_credentials:
+        print(f"ERROR: no [credentials] in {CONFIG_FILENAME}; the server has nothing to run as.")
+        sys.exit(1)
 
     client = MCPTestClient(verbose=verbose)
     client.start()

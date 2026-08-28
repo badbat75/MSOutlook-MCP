@@ -4,14 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 19 MCP tools.
+Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 20 MCP tools.
 
 **Core Architecture:**
 - **`MCPServer` from the official `mcp` SDK 2.x** (`mcp.server.mcpserver`; the 1.x `FastMCP` import no longer exists) for tool registration and server lifecycle
 - **MSAL (Microsoft Authentication Library)** for OAuth2 with automatic token refresh
 - **Microsoft Graph API v1.0** for all Outlook operations
 - **Async/await** throughout using httpx for HTTP client
-- **Two transports, one entry point:** stdio (credentials from `OUTLOOK_*` env vars) or streamable HTTP (credentials from `X-Outlook-*` request headers), selected by the external `outlook_mcp.toml` file
+- **Two transports, one entry point:** stdio or streamable HTTP, selected by the external `outlook_mcp.toml` file, which is also where the single Azure AD app registration lives
+- **No credential ever travels in a request.** Over stdio the operating system user is the boundary; over HTTP a reverse proxy authenticates the user and appends an identity header, and each user gets their own MSAL token cache
 
 ## Project Structure
 
@@ -20,43 +21,43 @@ OutlookMCP/
 ├── outlook_mcp/                # Core package
 │   ├── __init__.py
 │   ├── app.py                  # The MCPServer instance + lifespan (GraphClientPool)
-│   ├── server.py               # Entry point: argparse, .env, config, mcp.run()
-│   ├── config.py               # outlook_mcp.toml loader: transport, bind_host, bind_port
-│   ├── env.py                  # .env loader + PROJECT_ROOT, shared by every entry point
-│   ├── credentials.py          # Credentials, env/header readers, GraphClientPool, get_graph()
-│   ├── auth.py                 # AuthManager + GraphClient + shared MSAL token cache
+│   ├── server.py               # Entry point: argparse, config, mcp.run()
+│   ├── config.py               # outlook_mcp.toml: PROJECT_ROOT and the whole configuration
+│   ├── credentials.py          # Credentials, ProxyAuthPolicy, Principal, GraphClientPool, get_graph()
+│   ├── auth.py                 # AuthManager + GraphClient + the token cache layout
 │   ├── authorize.py            # The OAuth2 authorization code flow (outlook-mcp-auth)
+│   ├── enroll.py               # /oauth/login + /oauth/callback: users enrol themselves
+│   ├── downloads.py            # /attachments/<token>, the per-user/per-message file layout
 │   ├── folders.py              # Well-known aliases, name lookup, folder tree rendering
 │   ├── attachments.py          # Inline (<=3MB) and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
 │   ├── models.py               # Pydantic input models
-│   └── tools/                  # The 19 @mcp.tool() definitions
+│   └── tools/                  # The 20 @mcp.tool() definitions
 │       ├── __init__.py         # Imports the three modules = registers every tool
-│       ├── mail.py             # 11 email tools
+│       ├── mail.py             # 12 email tools
 │       ├── calendar.py         # 7 calendar tools
 │       └── profile.py          # 1 profile tool
 ├── scripts/
-│   ├── setup-env.ps1           # Load .env + activate venv into YOUR shell (Windows)
-│   ├── setup-env.sh            # Load .env + activate venv into YOUR shell (macOS/Linux)
+│   ├── deploy.sh                   # Deploy to a Linux host as a systemd service
 │   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
 │   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
-│   ├── unit/                   # pytest, no network: env, config, credentials
+│   ├── unit/                   # pytest, no network: config, credentials, auth, enroll, downloads
 │   └── integration/            # Hand-run scripts that call the real Graph API
 │       ├── test_mcp_server.py  # JSON-RPC over stdio
-│       └── test_http_server.py # Streamable HTTP, credentials as headers
+│       └── test_http_server.py # Streamable HTTP, identity as a header
 ├── docs/
 │   ├── SETUP.md                # The single setup guide (was QUICKSTART.md)
 │   └── SETUP_PERSONAL_ACCOUNTS.md  # Personal account specifics + AADSTS error table
 ├── contrib/                    # Deployment helpers, not part of the server
 │   ├── mcp_call.py             # Minimal stdio client for calling one tool by hand
-│   └── openclaw.json           # MCP host config for the openclaw Linux deployment
+│   ├── openclaw.json           # MCP host config for the openclaw Linux deployment
+│   └── systemd/                # The unit template deploy.sh renders and installs
 ├── outlook_mcp_server.py       # Entry point wrapper (identical to the outlook-mcp command)
 ├── outlook_mcp_auth.py         # Wrapper (identical to the outlook-mcp-auth command)
-├── outlook_mcp.toml.example    # Server configuration template (copy to outlook_mcp.toml, gitignored)
+├── outlook_mcp.toml.example    # The configuration template (copy to outlook_mcp.toml, gitignored)
 ├── pyproject.toml              # Package metadata, dependencies, pytest config
-├── requirements.txt            # `-e .` only; versions live in pyproject.toml
-└── .env.example                # Credentials template
+└── requirements.txt            # `-e .` only; versions live in pyproject.toml
 ```
 
 **Where things go.** A new tool goes in `tools/`, never in `server.py`:
@@ -98,13 +99,28 @@ The project uses a **two-command approach** for OAuth2:
    python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
    ```
 
-2. **Server Runtime** (`outlook_mcp_server.py` → `outlook_mcp/server.py`):
-   - Loads cached tokens on startup via `AuthManager` in `outlook_mcp/auth.py`
+   `--user EMAIL` writes that user's own cache instead of the shared one, for
+   an HTTP deployment. It starts from an empty cache on purpose: one file, one
+   account, so `get_accounts()` is never ambiguous.
+
+2. **Browser enrollment** (`outlook_mcp/enroll.py`, HTTP deployments only):
+   `/oauth/login` and `/oauth/callback`, registered on the HTTP app but
+   answering 404 unless `[auth].public_url` is set. The visitor has already
+   been authenticated by the reverse proxy, so the routes only collect their
+   consent at Microsoft and write their cache. Without this an operator has to
+   run `outlook-mcp-auth --user` for every mailbox, which does not scale.
+
+3. **Server Runtime** (`outlook_mcp_server.py` → `outlook_mcp/server.py`):
+   - Loads the cache belonging to the caller via `AuthManager` in `outlook_mcp/auth.py`
    - Handles automatic token refresh via MSAL
-   - Falls back to client credentials flow if no cached user token exists
+   - Falls back to client credentials only for the single-user (stdio) manager;
+     a per-user manager raises instead, so an unenrolled caller is never handed
+     a token that acts as the application
    - Token cache is persisted automatically when state changes
 
-**Critical:** If authentication fails at runtime, the error message will tell users to run `python outlook_mcp_auth.py` again.
+**Critical:** If authentication fails at runtime, the error message names the
+way out for that caller: `python outlook_mcp_auth.py`, or
+`outlook-mcp-auth --user <them>` / `/oauth/login` for a named user.
 
 ## Environment Setup
 
@@ -128,74 +144,91 @@ pip install -r requirements.txt
 
 **Important:** The virtual environment must be activated before running any scripts or installing dependencies.
 
-### Environment Variables
+### Configuration (`outlook_mcp.toml`)
 
-**Required in stdio mode (and by `outlook_mcp_auth.py`):**
-```bash
-OUTLOOK_CLIENT_ID      # Azure AD App client ID
-OUTLOOK_CLIENT_SECRET  # Azure AD App client secret
-OUTLOOK_TENANT_ID      # Azure AD tenant ID or "common"
-```
+**`outlook_mcp/config.py` is the only source of configuration.** There is no
+`.env`, no `OUTLOOK_*` variable, and no credential in any request: the one
+environment variable left is `$OUTLOOK_MCP_CONFIG`, which says where the file
+is and never what is in it. Do not reintroduce an environment fallback: two
+sources meant a value could differ between the server and the auth command,
+which is how a quoted secret used to work in one process and fail in the next.
 
-**Optional:**
-```bash
-OUTLOOK_DOWNLOAD_PATH  # Custom path for email attachments (default: ~/Downloads/outlook_attachments)
-OUTLOOK_MCP_CONFIG     # Path to the TOML server configuration (default: <project root>/outlook_mcp.toml)
-OUTLOOK_ENV_FILE       # Path to the .env to read (default: <project root>/.env)
-```
-
-**The server reads the `.env` itself** through `outlook_mcp/env.py`, from the
-project root, whatever the CWD is. That module is the only `.env` parser in the
-codebase: the server, `outlook_mcp_auth.py`, the integration scripts and
-`contrib/mcp_call.py` all call `load_project_env()`. Do not add a second one.
-Variables already present in the environment always win over the file, so a
-Claude Desktop `env` block or a systemd `Environment=` line still overrides it.
-`--env-file` / `$OUTLOOK_ENV_FILE` move the location; an explicit path that
-does not exist is a hard error (exit code 2), mirroring `--config`.
-
-**In HTTP mode the three credential variables are ignored.** Every request must
-carry `X-Outlook-Client-Id`, `X-Outlook-Client-Secret` and (optionally,
-default `common`) `X-Outlook-Tenant-Id`; a call without them returns an error
-naming the missing headers. `OUTLOOK_DOWNLOAD_PATH` stays server-side in both
-modes: a remote caller must never choose where the server writes files.
-
-### Server Configuration File (`outlook_mcp.toml`)
-
-Transport and HTTP bind address are never command-line flags; they live in a
-TOML file resolved in this order: `--config PATH`, `$OUTLOOK_MCP_CONFIG`,
-`<project root>/outlook_mcp.toml` (CWD-independent). No file means stdio.
-An explicit path that does not exist, invalid TOML, or invalid values are hard
-errors (exit code 2), never a silent fallback to stdio.
+Lookup order: `--config PATH`, `$OUTLOOK_MCP_CONFIG`,
+`<project root>/outlook_mcp.toml` (CWD-independent). No file at all means a
+stdio server with no credentials: it starts, and the first tool call says what
+is missing. An explicit path that does not exist, invalid TOML, or invalid
+values are hard errors (exit code 2), never a silent fallback.
 
 ```toml
 [server]
 transport = "http"        # "stdio" (default) or "http"
-bind_host = "0.0.0.0"     # HTTP only
+bind_host = "127.0.0.1"   # HTTP only, and loopback only
 bind_port = 8000          # HTTP only
+allowed_hosts = ["mcp.example.com"]   # HTTP only; the Host a reverse proxy forwards
+
+[credentials]             # the app registration the server runs as, for everyone
+client_id = "..."
+client_secret = "..."
+tenant_id = "common"
+
+[auth]
+user_header = "X-Auth-Email"                     # HTTP only
+public_url = "https://outlook-mcp.example.com"   # HTTP only; enables /oauth/login and /attachments
+cache_dir = "/opt/outlook-mcp/data/caches"       # optional, either transport, absolute
+
+[attachments]
+download_path = "~/Downloads/outlook_attachments"   # optional
 ```
 
 The HTTP endpoint is `http://<bind_host>:<bind_port>/mcp` (streamable HTTP).
 Template: `outlook_mcp.toml.example`. The real file is gitignored.
 
-**Setting the credentials:**
+`[attachments].download_path` is server side on purpose: a remote caller must
+never choose where the server writes files, and never sees a path of its own
+choosing served back. `downloads.download_root()` is the one place that reads
+it, on every call and never at import time, because the entry point installs
+the configuration after the modules are imported.
 
-```bash
-cp .env.example .env    # then fill in the three OUTLOOK_* values
-```
+### The HTTP bind must be loopback (do not relax)
 
-That is the whole procedure: the server, the auth script and the tests all read
-that file. The `scripts/setup-env.*` helpers are for a different job, getting
-the same variables plus the activated venv into an **interactive shell**:
+`config._validate_deployment()` refuses to start an HTTP server bound anywhere
+but loopback. This is not hardening, it is the premise of the whole mode: over
+HTTP a request carries no credential, only the user header, and that header is
+believable purely because the reverse proxy replaces whatever the client sent.
+A reachable port means anyone can name any mailbox and be served that user's
+tokens. If a proxy has to live on another host, tunnel to the loopback port;
+do not widen the bind.
 
-```powershell
-. .\scripts\setup-env.ps1       # Windows, dot-sourced
-```
-```bash
-source ./scripts/setup-env.sh   # macOS/Linux
-```
+The matching duty on the proxy side is `proxy_set_header X-Auth-Email ...` in
+**every** location that forwards to the server: `/mcp`, `/oauth/` and
+`/attachments/` alike. A location without it passes the client's own header
+through. A missing or blank header is refused, so a forgotten line fails closed.
 
-They keep their own shell parser for that reason; nothing that runs the server
-depends on them.
+### `[server].allowed_hosts`, or: 421 Invalid Host header
+
+A loopback bind makes the MCP SDK turn on DNS-rebinding protection by itself
+(`mcp/server/lowlevel/server.py`: `if transport_security is None and host in
+("127.0.0.1", "localhost", "::1")`), and it then accepts a Host header of
+localhost and nothing else. That rule assumes a proxied server binds a routable
+address. This one does not: it binds loopback **and** sits behind a proxy,
+because the loopback bind above is the premise of the whole mode. A request
+forwarded with the site's own hostname is therefore answered **421 Invalid Host
+header**, from the SDK, not from uvicorn or nginx.
+
+`server._transport_security()` is the answer: naming the proxy's hostname in
+`[server].allowed_hosts` widens the list while **leaving the protection on**.
+Never fix a 421 by disabling the check instead: a loopback server that accepts
+any Host is exactly what the protection exists to prevent, and the deployment
+would still look fine.
+
+- Each name is registered twice, `host` and `host:*`, because nginx sends the
+  bare name with `proxy_set_header Host $host` and name-plus-port with
+  `$http_host`; the SDK compares the header literally
+- Loopback stays in the list, so a health check on the port itself keeps working
+- The key holds Host header values, never URLs. A `https://` prefix would never
+  match, so `config.py` refuses one and says what to write instead
+- Empty (the default) passes `transport_security=None`, which is identical to
+  passing nothing: an unproxied deployment is unaffected
 
 ### Azure AD App Requirements
 The app registration must have these **delegated permissions**:
@@ -203,7 +236,8 @@ The app registration must have these **delegated permissions**:
 - `Calendars.Read`, `Calendars.ReadWrite`
 - `User.Read`
 
-Redirect URI must be: `http://localhost:5000/callback`
+Redirect URIs: `http://localhost:5000/callback` for `outlook-mcp-auth`, plus
+`<public_url>/oauth/callback` when browser enrollment is enabled.
 
 ## Running the Server
 
@@ -216,6 +250,7 @@ Redirect URI must be: `http://localhost:5000/callback`
 # Initial auth (first time only)
 python outlook_mcp_auth.py                # Normal mode (opens browser)
 python outlook_mcp_auth.py --no-browser   # Headless mode (for remote systems)
+outlook-mcp-auth --user a@b.com           # One user of an HTTP deployment
 
 # Run with the transport from outlook_mcp.toml (stdio when the file is absent)
 python outlook_mcp_server.py
@@ -228,8 +263,8 @@ outlook-mcp
 ```
 
 `outlook_mcp_server.py` and `outlook-mcp` both call `outlook_mcp.server.main()`
-and behave identically, including the `.env` load. Keep it that way: putting
-setup in the wrapper is what made the two diverge before.
+and behave identically, including the configuration load. Keep it that way:
+putting setup in the wrapper is what made the two diverge before.
 
 ### Claude Desktop Integration
 Add to `claude_desktop_config.json` (use the venv Python interpreter):
@@ -258,9 +293,9 @@ Add to `claude_desktop_config.json` (use the venv Python interpreter):
 }
 ```
 
-No `env` block is needed: the server reads the project `.env`. Add one only to
-override it (a different app registration for this host, for instance), since
-environment variables take precedence over the file.
+No `env` block is needed or useful: the server reads `outlook_mcp.toml` from
+the project root. To point one host at a different app registration, add
+`"--config", "/path/to/other.toml"` to `args`.
 
 Or use the config generator:
 
@@ -282,12 +317,53 @@ claude mcp add outlook -- C:\path\to\OutlookMCP\venv\Scripts\python.exe outlook_
 # stdio (macOS/Linux)
 claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server.py
 
-# HTTP (remote server running with transport = "http"; headers are sent on every request)
-claude mcp add --transport http outlook http://server:8000/mcp \
-  --header "X-Outlook-Client-Id: ..." \
-  --header "X-Outlook-Client-Secret: ..." \
-  --header "X-Outlook-Tenant-Id: ..."
+# HTTP (remote server behind the reverse proxy that appends the identity header)
+claude mcp add --transport http outlook https://outlook-mcp.example.com/mcp
 ```
+
+The HTTP client sends no credential of its own. It authenticates to the proxy,
+and the proxy tells the server whose mailbox to open.
+
+### Deployment (`scripts/deploy.sh` + `contrib/systemd/`)
+
+```bash
+./scripts/deploy.sh --target root@host [--dir /opt/outlook-mcp] [--data-dir <dir>/data]
+                    [--service-user outlook-mcp] [--service-name outlook-mcp]
+                    [--config local.toml] [--port 8000] [--no-restart] [--dry-run]
+```
+
+Copies the checkout to a Linux host, builds the venv, installs the config and a
+rendered systemd unit, starts the service. The invariants behind it:
+
+- **A unit only makes sense for HTTP.** A stdio server is spawned once per
+  client by its MCP host; under systemd it would exit immediately. The script
+  refuses a config whose transport is not `http` rather than installing a unit
+  that cannot work
+- **The config and the data live beside the code, not in it**
+  (`<dir>/outlook_mcp.toml`, `<dir>/data/`, `<dir>/app/`). A deploy replaces
+  `app/` wholesale so no file survives a rename, which would destroy a config or
+  a token cache kept inside it
+- **A deployment names both directories it writes to**, `[auth].cache_dir` and
+  `[attachments].download_path`, and the deploy refuses a config that puts
+  either outside the data dir, since `ReadWritePaths=` grants exactly that one.
+  Enrollment then needs nothing but the same `--config` the service runs on.
+  The unit still sets `Environment=HOME=<data dir>` and `ProtectHome=no`, but
+  only so a stray `~` cannot resolve into a shared service account's home:
+  `auth.py` builds its defaults from `Path.home()` at import time, which is
+  right on a personal machine and wrong for a deployment
+- **Each installation gets its own sign-in.** Never copy a token cache between
+  hosts: Entra rotates the refresh token on redemption, so two copies redeeming
+  independently invalidate each other, and the failure looks intermittent
+- **Only `git ls-files --cached --others --exclude-standard` is uploaded**, so a
+  local `outlook_mcp.toml` or `.env` cannot travel by accident. A `--config` is
+  staged in a 0700 directory in the SSH user's home, never `/tmp`
+- **The config is validated on the host by `load_config()` before the restart**,
+  so a bad bind fails the deploy instead of crash-looping. This is also why the
+  unit sets `RestartPreventExitStatus=2`: exit 2 is `ConfigError`, and no
+  restart will fix it
+- The unit template is rendered with `sed` over at-sign delimited names, and the
+  deploy warns about any left unsubstituted. Never write such a name in its
+  comments: it substitutes there too, and the warning becomes a false alarm
 
 ## Key Implementation Details
 
@@ -297,39 +373,59 @@ claude mcp add --transport http outlook http://server:8000/mcp \
 |--------|---------|
 | `outlook_mcp/app.py` | The `mcp = MCPServer(...)` instance, `app_lifespan` (builds the `GraphClientPool`), `get_config()` / `set_config()`. Tool modules import `mcp` from here, which is what keeps server.py free to import the tools |
 | `outlook_mcp/server.py` | Entry point only: `_parse_args()`, `main()`, and the `from . import tools` whose side effect registers them |
-| `outlook_mcp/env.py` | `PROJECT_ROOT`, `parse_env_file()`, `resolve_env_path()`, `load_project_env()`, `EnvFileError`. The single `.env` parser |
-| `outlook_mcp/config.py` | `ServerConfig` + `load_config()`: TOML file lookup and validation for transport / bind_host / bind_port |
-| `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_env()`, `credentials_from_headers()`, `GraphClientPool`, `get_graph()` |
-| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, accepts a shared token cache), `GraphClient` (async HTTP), `load_token_cache()`, `CredentialsError`, and the shared constants `GRAPH_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `authority_for()` |
-| `outlook_mcp/authorize.py` | The OAuth2 authorization code flow: browser, headless and `--code` modes. The only place that flow lives |
+| `outlook_mcp/config.py` | `PROJECT_ROOT`, `ServerConfig` + `load_config()`, `is_loopback()`, `_validate_deployment()`. The whole configuration, and the only place any of it comes from |
+| `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_config()`, `ProxyAuthPolicy`, `Principal`, `GraphClientPool`, `current_user()`, `get_graph()` |
+| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, one cache and one cache path per principal), `GraphClient` (async HTTP), `load_token_cache()` / `save_token_cache()` / `user_cache_path()` / `shared_cache_path()`, `CredentialsError`, and the shared constants `GRAPH_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `USER_CACHE_DIR` / `authority_for()`. The two path helpers take an optional directory, `None` meaning the home-directory default, so a caller can pass `config.cache_directory` straight through |
+| `outlook_mcp/authorize.py` | The OAuth2 authorization code flow: browser, headless, `--code` and `--user` modes. The only place that flow lives |
+| `outlook_mcp/enroll.py` | The two enrollment routes and the in-memory table of sign-ins in flight |
+| `outlook_mcp/downloads.py` | The `/attachments/<token>` route, the in-memory table of one-time links, `download_root()` / `message_dir()` (where a downloaded file goes), `offer()`, `delete_message_downloads()` |
 | `outlook_mcp/folders.py` | `WELL_KNOWN_FOLDERS`, `find_folder_id_by_name()`, `resolve_folder()`, `format_folder_tree()` |
 | `outlook_mcp/attachments.py` | `read_attachment_meta()`, `attach_small_file()` (<=3MB inline), `attach_large_file()` (upload session), `attach_files()` |
-| `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `attachment_download_dir()` |
+| `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`, `format_attachment_summary()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `save_attachment_to_disk()` |
 | `outlook_mcp/models.py` | All Pydantic v2 input models with validation |
 | `outlook_mcp/tools/` | The `@mcp.tool()` definitions, split mail / calendar / profile |
 
-### Credential Resolution (`get_graph`)
+### Principal Resolution (`get_graph`)
 
-`get_graph(ctx)` in `credentials.py` decides the credential source from the
-transport, not from a flag: over HTTP the SDK attaches the Starlette `Request` to
-`ctx.request_context.request`, and the `X-Outlook-*` headers of that request
-are authoritative; over stdio the request is `None` and the `OUTLOOK_*`
-variables read at startup are used. The lifespan holds a `GraphClientPool`
-that creates one `AuthManager`/`GraphClient` per distinct credential set on
-first use; all of them share one MSAL token cache (entries are keyed by client
-id, one `serialize()` persists them all), so several app registrations can be
-served by one HTTP process as long as `outlook_mcp_auth.py` was run for each.
+`get_graph(ctx)` in `credentials.py` answers one question, "whose mailbox is
+this", from the transport rather than from a flag. The app registration is
+always the one in `[credentials]`; what varies is the user:
 
-### Secret Verification (do not remove)
+- **stdio**: `ctx.request_context.request` is `None`. One `Principal` with no
+  user, backed by the shared cache: `~/.outlook_mcp_token_cache.json`, or
+  `<cache_dir>/shared.json` where one is configured.
+- **HTTP**: the SDK attaches the Starlette `Request`, and `ProxyAuthPolicy`
+  reads the configured identity header off it. One `Principal` per user, each
+  backed by its own `<sha256(address)>.json` under `[auth].cache_dir`, or under
+  `~/.outlook_mcp/caches/` when that is unset.
+
+**Per-user caches must stay separate files.** MSAL indexes cache entries by
+client id, never by account, so one shared cache under a single app
+registration would put every user's account in the same file and
+`get_accounts()[0]` would return an arbitrary one: a cross-user token leak. The
+isolation is the file, not a lookup key. And do not filter accounts by the
+proxy-asserted address instead: the proxy identity and the Microsoft account
+are different identity systems and may legitimately differ. What keeps one file
+unambiguous is that enrollment always writes a fresh cache.
+
+`AuthManager` carries `user` for the same reason: when it is set, the app-only
+client credentials fallback is off. With one app registration serving everyone,
+letting an unenrolled caller through to `acquire_token_for_client` would hand
+them a token acting as the application itself.
+
+### Secret Verification
 
 **An `AuthManager` never serves a token out of the MSAL cache until AAD has
 confirmed its client secret at least once.** MSAL keys cached tokens by client
 id and never by secret (`acquire_token_silent` builds its query from
-`client_id`, `environment`, `realm`, `home_account_id`), so without this rule a
-caller who sends a valid `X-Outlook-Client-Id`, which is not secret material,
-plus any string at all as the secret would be handed a working Graph token for
-as long as an access token stays cached. The pool keys on the full credential
-tuple, so the wrong secret gets its own unverified `AuthManager`.
+`client_id`, `environment`, `realm`, `home_account_id`).
+
+The bypass this was written for, a caller sending a valid client id with any
+string as the secret, is no longer reachable now that credentials come only
+from the configuration file. What it still buys is a clear first error:
+"wrong secret" and "expired grant" surface as `CredentialsError` on the first
+call instead of as a confusing Graph failure later. Cost: one extra token round
+trip per principal per process.
 
 How it is enforced in `get_token()`:
 
@@ -342,16 +438,53 @@ How it is enforced in `get_token()`:
   private empty cache that therefore has to reach AAD.
 
 Both paths set `_secret_verified` on success, after which the cache is used
-normally. Cost: one extra token round trip per credential set per process.
-`tests/unit/test_auth.py` pins all of it.
+normally. `tests/unit/test_auth.py` pins all of it.
+
+### Downloaded Attachments (`downloads.py`)
+
+`outlook_get_attachment` writes to the filesystem of the machine the **server**
+runs on. Over stdio that is the caller's machine too, so the path in the answer
+is the deliverable. Over HTTP it is not, and a path there is useless to whoever
+asked: `downloads.py` closes that gap with one route and one file layout.
+
+**The layout is the mechanism, not bookkeeping.** A file lands at
+`<download_path>/<sha256(address)>/msg-<sha256(message id)[:16]>/<name>`, and
+each level pays for itself:
+
+- The **user** level is the same isolation the token caches have. Without it one
+  directory holds everybody's mail attachments, and one person's filenames show
+  up in the duplicate suffixes generated for another's. Over stdio it is absent:
+  there is one person, and it is their own download directory.
+- The **message** level is what makes deletion possible with no index to keep
+  in sync. `outlook_delete_attachment_files` is handed a message id, never a
+  path, and empties exactly one directory. Recomputing beats recording.
+
+**A download link is a one-time ticket, and it is bound to a user.**
+`offer()` mints an opaque token into an in-memory table; `/attachments/<token>`
+runs the same `ProxyAuthPolicy` the tools do, refuses a token minted for anybody
+else, and consumes the token on the way through, wrong user included. A leaked
+link therefore buys nothing, and a transcript kept afterwards holds nothing
+usable. Do not add a "fetch it again" convenience: re-issuing is one tool call
+away, and a reusable link in a chat log is the whole risk.
+
+Consequences worth keeping in mind:
+
+- **`/attachments/` needs the proxy's `proxy_set_header` line** exactly like
+  `/mcp` and `/oauth/`. Without it the route sees the client's own header.
+- The route answers **404 unless `[auth].public_url` is set**, and without it
+  the tool falls back to reporting the server-side path and says so. It has no
+  other way to know what URL it is reachable on.
+- Nothing prunes the files. Deletion is the agent's job through the tool, or the
+  operator's through a timer over `download_path`.
 
 ### MCP Tool Categories
 
-**Email Tools (11):**
+**Email Tools (12):**
 - `outlook_list_mail` - OData filtering, full-text search, pagination ($top, $skip); `folder="*"` searches across the whole mailbox (all folders), and subfolder display names (e.g. "Centri Estivi") resolve automatically
 - `outlook_get_mail` - Full message details including body HTML and attachments metadata
 - `outlook_list_attachments` - List attachment metadata (name, size, type, ID)
-- `outlook_get_attachment` - Download attachment to configured path (default: ~/Downloads/outlook_attachments/) and return file path (all attachments saved to disk - base64 streaming too heavy for MCP; path configurable via OUTLOOK_DOWNLOAD_PATH env var)
+- `outlook_get_attachment` - Download attachment to the configured path (default: ~/Downloads/outlook_attachments/), filed per user and per message. Answers with the file path over stdio, and over HTTP with a one-time link at `<public_url>/attachments/<token>`. Every attachment goes to a file: a base64 data URL of a real attachment is far too heavy to send back through MCP
+- `outlook_delete_attachment_files` - Remove what was downloaded from one message (or one named file of it) from the server's filesystem. The mailbox is untouched and the attachment can be fetched again
 - `outlook_send_mail` - HTML body support, CC/BCC, importance levels
 - `outlook_create_draft` - Create draft without sending
 - `outlook_reply_mail` - Reply or reply-all with comment
@@ -422,8 +555,8 @@ python tests/integration/test_mcp_server.py
 python tests/integration/test_mcp_server.py --verbose  # Full response output
 python tests/integration/test_mcp_server.py --quick    # Handshake + profile only
 
-# 4. Integration, HTTP transport (temporary config on a free port, creds sent as
-#    headers, server denied both OUTLOOK_* and the project .env)
+# 4. Integration, HTTP transport (temporary config on a free port, a throwaway
+#    identity enrolled and removed again, driven by X-Auth-Email alone)
 python tests/integration/test_http_server.py
 
 # 5. Test via Claude Desktop (restart Claude Desktop to reload the server)
@@ -476,11 +609,13 @@ is never registered.
 ### Debugging
 
 - Server logs go to stderr (the SDK's `MCPServer` configures logging); the HTTP startup banner is printed to stderr too, never to stdout
-- Token cache issues: delete `~/.outlook_mcp_token_cache.json` and re-auth
+- Token cache issues: delete `~/.outlook_mcp_token_cache.json` and re-auth. For one user of an HTTP deployment the file is `<sha256(lowercased address)>.json` under `[auth].cache_dir`, or under `~/.outlook_mcp/caches/` when unset; `outlook_mcp.auth.user_cache_path()` computes it, and `shared_cache_path()` the single-account one. Never guess the path: ask the deployed code, `load_config(<its toml>)` then `user_cache_path(address, config.cache_directory)`
+- "\<user\> has not authorized this server": that user has no cache, or nothing usable in it. Not a bug, and deliberately not a fallback: they enrol at `/oauth/login`, or an operator runs `outlook-mcp-auth --user <them>`
 - "No valid token available", or "Could not obtain a token for this client id", together with `AADSTS700016` from MSAL, means the app registration behind the client id no longer exists in the directory: that is an Azure-side problem, not a code regression. The second message comes from the secret verification described above, which is the first thing to fail when the registration is gone
+- A download link that answers 404: it is single use, it expires after `downloads.TICKET_TTL_SECONDS`, and it is refused for anyone but the user it was minted for. The table is in memory, so a restart invalidates every outstanding link. All of that is by design; the fix is to call `outlook_get_attachment` again
 - Graph API errors: check response body in exception (includes error code and message)
 - Rate limiting: Graph returns 429 with Retry-After header (not auto-handled currently)
-- The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it, which may not even be traversable by the server's user (e.g. a daemon started from another user's 0700 home). With mcp SDK 1.x this used to crash at startup because FastMCP's pydantic-settings probed `./.env`; SDK 2.x reads no `.env` / `MCP_*` at all, and every path this project resolves itself (`outlook_mcp.toml` via `config.DEFAULT_CONFIG_PATH`, the `.env` via `env.DEFAULT_ENV_PATH`) hangs off `env.PROJECT_ROOT`, which is `__file__`-derived. Keep it that way: no relative path, no `Path.cwd()`
+- The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it, which may not even be traversable by the server's user (e.g. a daemon started from another user's 0700 home). With mcp SDK 1.x this used to crash at startup because FastMCP's pydantic-settings probed `./.env`; SDK 2.x reads no `.env` / `MCP_*` at all, and the one path this project resolves itself (`outlook_mcp.toml` via `config.DEFAULT_CONFIG_PATH`) hangs off `config.PROJECT_ROOT`, which is `__file__`-derived. Keep it that way: no relative path, no `Path.cwd()`
 
 ## Microsoft Graph API Quirks
 

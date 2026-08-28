@@ -1,6 +1,8 @@
 """Authentication and Microsoft Graph API client."""
 
+import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +26,19 @@ GRAPH_SCOPE_URLS = [f"https://graph.microsoft.com/{s}" for s in GRAPH_SCOPES]
 # Must match the redirect URI registered on the Azure AD app registration.
 REDIRECT_URI = "http://localhost:5000/callback"
 
+# The defaults, for a server nobody told where to keep its caches: one person's
+# machine, where a dotted name under their home is the polite thing to be. A
+# deployment that owns a directory of its own says so with [auth].cache_dir, and
+# then nothing here is used: repeating the package name inside a directory that
+# already belongs to this server would be noise, not namespacing.
 TOKEN_CACHE_PATH = Path.home() / ".outlook_mcp_token_cache.json"
+
+# One cache file per user, for the deployments where a reverse proxy says which
+# user a request belongs to. Separate files rather than one shared cache: MSAL
+# indexes its entries by client id, so a single app registration serving several
+# people would put every account in one cache and get_accounts()[0] would return
+# an arbitrary one. The isolation has to be the file, not a lookup key.
+USER_CACHE_DIR = Path.home() / ".outlook_mcp" / "caches"
 
 logger = logging.getLogger("outlook_mcp")
 
@@ -32,6 +46,37 @@ logger = logging.getLogger("outlook_mcp")
 def authority_for(tenant_id: str) -> str:
     """The AAD authority URL for a tenant id (or "common")."""
     return f"https://login.microsoftonline.com/{tenant_id}"
+
+
+def user_digest(user: str) -> str:
+    """The filesystem name standing for one user, everywhere this server writes.
+
+    A hash of the address rather than the address itself: it keeps the name
+    portable whatever the address contains, and a directory listing then
+    discloses how many people are served but not who they are. Whitespace and
+    case are normalised first, because the proxy may spell the same person
+    differently from one request to the next.
+    """
+    return hashlib.sha256(user.strip().casefold().encode("utf-8")).hexdigest()
+
+
+def user_cache_path(user: str, directory: Optional[Path] = None) -> Path:
+    """Where one user's MSAL cache lives.
+
+    ``directory`` is [auth].cache_dir when a deployment set one. None means the
+    default, so a caller can pass the configured value straight through without
+    repeating the fallback.
+    """
+    return (directory or USER_CACHE_DIR) / f"{user_digest(user)}.json"
+
+
+def shared_cache_path(directory: Optional[Path] = None) -> Path:
+    """Where the cache for a single-account (stdio) server lives.
+
+    Named rather than digested: there is no address to hash, because nothing in
+    the request says who the caller is. One file, one account.
+    """
+    return TOKEN_CACHE_PATH if directory is None else directory / "shared.json"
 
 
 class CredentialsError(RuntimeError):
@@ -44,12 +89,28 @@ def load_token_cache(path: Path = TOKEN_CACHE_PATH) -> msal.SerializableTokenCac
     One cache instance can back several ``AuthManager`` objects: MSAL keys every
     entry by client id, so tokens for different app registrations coexist and a
     single serialize() call persists all of them. Give each AuthManager its own
-    cache object only if they must never see each other's tokens.
+    cache object only if they must never see each other's tokens, which is
+    exactly what the per-user caches above are for.
     """
     cache = msal.SerializableTokenCache()
     if path.exists():
         cache.deserialize(path.read_text())
     return cache
+
+
+def save_token_cache(cache: msal.SerializableTokenCache, path: Path) -> None:
+    """Write a token cache, creating its directory and keeping it private.
+
+    The file holds refresh tokens, so it is created 0600 before anything is
+    written to it. On Windows the mode is ignored and the ACL inherited from
+    the user profile is what protects it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        # Create empty with the right mode first: writing then chmod-ing would
+        # leave the tokens world-readable for the width of that window.
+        os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
+    path.write_text(cache.serialize())
 
 
 # =============================================================================
@@ -65,14 +126,26 @@ class AuthManager:
         client_secret: str,
         tenant_id: str,
         token_cache: Optional[msal.SerializableTokenCache] = None,
+        cache_path: Path = TOKEN_CACHE_PATH,
+        user: Optional[str] = None,
     ):
         self.client_id = client_id
         self.client_secret = client_secret
         self.tenant_id = tenant_id
         self.authority = authority_for(tenant_id)
+        # Set only when a reverse proxy told us whose mailbox this is. It marks
+        # the manager as belonging to one enrolled person, which changes two
+        # things: the errors talk about enrolling, and the app-only fallback is
+        # off (see get_token), because acting as the application is precisely
+        # what an unenrolled user must not be able to do.
+        self.user = user
         # A caller may hand in a cache shared with other managers (HTTP mode,
         # one manager per set of header credentials); otherwise load our own.
-        self._cache = token_cache if token_cache is not None else load_token_cache()
+        self._cache = token_cache if token_cache is not None else load_token_cache(cache_path)
+        # Where that cache is written back. It travels with the cache object: a
+        # manager holding one user's cache must never persist it over the shared
+        # file, which is how every user would end up sharing one account.
+        self._cache_path = cache_path
         self._app: Optional[msal.ConfidentialClientApplication] = None
         # Whether AAD has confirmed this client secret at least once. Until it
         # has, no token may be served out of the cache. See get_token().
@@ -81,7 +154,7 @@ class AuthManager:
     def _save_cache(self):
         """Persist token cache to disk."""
         if self._cache.has_state_changed:
-            TOKEN_CACHE_PATH.write_text(self._cache.serialize())
+            save_token_cache(self._cache, self._cache_path)
 
     @property
     def app(self) -> msal.ConfidentialClientApplication:
@@ -139,8 +212,17 @@ class AuthManager:
                 raise CredentialsError(
                     "Could not obtain a token for this client id. Either the "
                     "client secret is wrong, or the cached authorization has "
-                    "expired: re-run python outlook_mcp_auth.py."
+                    f"expired: {self._reauthorize_hint()}."
                 )
+
+        if self.user is not None:
+            # Per-user manager with nothing usable in its cache. Falling through
+            # to client credentials would hand an unenrolled caller a token that
+            # acts as the application itself, so the road stops here.
+            raise CredentialsError(
+                f"{self.user} has not authorized this server to reach their "
+                f"mailbox, or that authorization has expired: {self._reauthorize_hint()}."
+            )
 
         # No delegated account for this client id: client credentials (app-only).
         app = self.app if self._secret_verified else self._unverified_client_app()
@@ -156,6 +238,12 @@ class AuthManager:
             "No valid token available. Run the auth setup script first: "
             "python outlook_mcp_auth.py"
         )
+
+    def _reauthorize_hint(self) -> str:
+        """How the operator of this particular manager fixes a missing grant."""
+        if self.user is None:
+            return "re-run python outlook_mcp_auth.py"
+        return f"re-run outlook-mcp-auth --user {self.user}, or sign in again at /oauth/login"
 
 
 # =============================================================================

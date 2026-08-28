@@ -7,11 +7,12 @@ the ``outlook-mcp-auth`` console script installed by ``pip install .``: both
 call ``outlook_mcp.authorize.main()``.
 
 Usage:
-    python outlook_mcp_auth.py                # opens a browser
-    python outlook_mcp_auth.py --no-browser   # headless / SSH
+    python outlook_mcp_auth.py                     # opens a browser
+    python outlook_mcp_auth.py --no-browser        # headless / SSH
     python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
+    python outlook_mcp_auth.py --user a@b.com      # one user of an HTTP deployment
 
-Credentials come from the project .env, or from the environment if already set.
+The app registration comes from the same outlook_mcp.toml the server reads.
 See outlook_mcp/authorize.py for the full implementation.
 """
 

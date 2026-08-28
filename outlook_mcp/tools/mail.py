@@ -2,26 +2,32 @@
 
 import base64
 import json
+from pathlib import Path
 from typing import Any, Dict
 
 from mcp.server.mcpserver import Context
 
 from ..app import mcp
 from ..attachments import attach_files
-from ..credentials import get_graph
+from ..credentials import current_user, get_graph
+from ..downloads import (
+    TICKET_TTL_SECONDS,
+    delete_message_downloads,
+    message_dir,
+    offer,
+)
 from ..folders import format_folder_tree, resolve_folder
 from ..helpers import (
-    create_data_url,
     format_attachment_summary,
     format_email_summary,
     handle_graph_error,
     make_recipients,
     save_attachment_to_disk,
-    should_save_to_disk,
     validate_odata_filter,
 )
 from ..models import (
     CreateDraftInput,
+    DeleteAttachmentFilesInput,
     DeleteMailInput,
     GetAttachmentInput,
     GetMailInput,
@@ -516,18 +522,26 @@ async def outlook_get_attachment(params: GetAttachmentInput, ctx: Context = None
     - itemAttachment: Embedded emails or calendar items → metadata only
     - referenceAttachment: Cloud file links (OneDrive, SharePoint) → URL provided
 
-    All file attachments are saved to disk (base64 streaming is too heavy for MCP).
-    Download path can be customized via OUTLOOK_DOWNLOAD_PATH env var
-    (default: ~/Downloads/outlook_attachments/).
+    All file attachments are saved to disk (base64 streaming is too heavy for MCP),
+    under [attachments].download_path in outlook_mcp.toml (default:
+    ~/Downloads/outlook_attachments/). The file is written on the machine the
+    server runs on, so what comes back depends on where the caller is: a path
+    when that is the same machine, and otherwise a one-time download link.
+
+    The file stays there until it is deleted. Call
+    outlook_delete_attachment_files with the same message ID when done with it.
 
     Args:
         params: Message ID and attachment ID
 
     Returns:
-        str: File path (for fileAttachment) or metadata (for other types)
+        str: A download link or a file path (fileAttachment), or metadata (other types)
     """
     try:
         graph = get_graph(ctx)
+        # Whose download this is: it picks the directory the file is written to,
+        # and over HTTP it is who the download link will be minted for.
+        user = current_user(ctx)
         endpoint = f"/me/messages/{params.message_id}/attachments/{params.attachment_id}"
 
         # Get attachment metadata and content
@@ -556,33 +570,40 @@ async def outlook_get_attachment(params: GetAttachmentInput, ctx: Context = None
             except Exception as e:
                 return result + f"Error decoding base64 content: {e}"
 
-            # Decide: disk or inline?
-            if should_save_to_disk(content_type, size_bytes, params.save_to_disk):
-                # Save to disk
-                try:
-                    file_path = save_attachment_to_disk(name, content_bytes)
-                    result += f"✅ **Saved to disk:**\n`{file_path}`\n\n"
-                    result += "*File is ready to access on your local system.*"
-                    return result
-                except Exception as e:
-                    return result + f"Error saving to disk: {e}"
+            # Written under this caller's own directory for this message, which
+            # is what lets outlook_delete_attachment_files find it again without
+            # the caller ever naming a path.
+            try:
+                file_path = save_attachment_to_disk(
+                    name, content_bytes, message_dir(user, params.message_id)
+                )
+            except Exception as e:
+                return result + f"Error saving to disk: {e}"
+
+            url = offer(Path(file_path), name, content_type, user)
+            minutes = TICKET_TTL_SECONDS // 60
+            if url:
+                result += f"✅ **Ready to download:**\n{url}\n\n"
+                result += (
+                    f"*One-time link, good for {minutes} minutes and only for "
+                    f"you. The file stays on the server until you call "
+                    f"`outlook_delete_attachment_files`.*"
+                )
+            elif user is not None:
+                result += f"✅ **Saved on the server:**\n`{file_path}`\n\n"
+                result += (
+                    "*That path is on the machine the server runs on, not "
+                    "yours: set [auth].public_url in outlook_mcp.toml and the "
+                    "server can hand you the file over HTTP instead. Remove it "
+                    "with `outlook_delete_attachment_files`.*"
+                )
             else:
-                # Return as base64 data URL
-                data_url = create_data_url(content_type, content_bytes_b64)
-
-                # For images, Claude can render them directly
-                if content_type in {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/bmp", "image/webp"}:
-                    result += "✅ **Image ready for viewing:**\n\n"
-                    result += f"![{name}]({data_url})\n\n"
-                    result += f"*Data URL: `{data_url[:80]}...` ({len(data_url)} chars)*"
-                else:
-                    # For PDFs and text files, provide data URL
-                    result += f"✅ **Content available as base64 data URL:**\n\n"
-                    result += f"```\n{data_url[:200]}...\n```\n\n"
-                    result += f"*Full data URL length: {len(data_url)} characters*\n"
-                    result += "*You can analyze this content or ask to save it to disk.*"
-
-                return result
+                result += f"✅ **Saved to disk:**\n`{file_path}`\n\n"
+                result += (
+                    "*File is ready to access on your local system. Remove it "
+                    "with `outlook_delete_attachment_files` when done.*"
+                )
+            return result
 
         elif att_type == "#microsoft.graph.itemAttachment":
             # Embedded email or calendar item
@@ -634,3 +655,55 @@ async def outlook_get_attachment(params: GetAttachmentInput, ctx: Context = None
 
     except Exception as e:
         return handle_graph_error(e)
+
+
+@mcp.tool(
+    name="outlook_delete_attachment_files",
+    annotations={
+        "title": "Delete Downloaded Attachment Files",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def outlook_delete_attachment_files(
+    params: DeleteAttachmentFilesInput, ctx: Context = None
+) -> str:
+    """Delete the attachment files this server downloaded from one message.
+
+    The filesystem only: the message and its attachments in the mailbox are
+    untouched, and outlook_get_attachment can fetch them again at any time. Call
+    it once an attachment has been read, so that downloads do not pile up on the
+    machine the server runs on.
+
+    A caller names a message, never a path. The files removed are the ones this
+    server wrote for that message under the caller's own download directory, so
+    one user can never delete another's.
+
+    Args:
+        params: Message ID, and optionally the single filename to remove
+
+    Returns:
+        str: What was deleted, or a note that there was nothing to delete
+    """
+    try:
+        removed = delete_message_downloads(
+            current_user(ctx), params.message_id, params.filename
+        )
+    except Exception as e:
+        return handle_graph_error(e)
+
+    if not removed:
+        named = f" named `{params.filename}`" if params.filename else ""
+        return (
+            f"Nothing to delete: this server holds no downloaded file{named} for "
+            f"message `{params.message_id}`."
+        )
+
+    listed = "\n".join(f"- `{name}`" for name in removed)
+    return (
+        f"🗑️ **Deleted {len(removed)} file(s)** downloaded from message "
+        f"`{params.message_id}`:\n{listed}\n\n"
+        f"*The attachments themselves are still in the mailbox.*"
+    )

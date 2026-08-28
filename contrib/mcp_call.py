@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight MCP stdio client for MS Outlook MCP server.
 
-Credentials are not handled here: the server reads the project .env itself,
+Credentials are not handled here: the server reads outlook_mcp.toml itself,
 exactly as it does when a real MCP host spawns it.
 
 Usage:
@@ -78,6 +78,15 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+
+    # Tool results carry the emoji the server formats its summaries with, and a
+    # Windows console is cp1252: printing one raises UnicodeEncodeError and
+    # loses the whole response after the call already succeeded. ensure_ascii is
+    # off on purpose, to show accented subjects as themselves, so the stream has
+    # to tolerate what it cannot render.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
 
     tool_name = sys.argv[1]
     args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {"params": {}}

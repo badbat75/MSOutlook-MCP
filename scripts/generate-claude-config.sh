@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Outlook MCP - Claude Desktop Config Generator
 # ===============================================
-# Generates claude_desktop_config.json with correct paths and credentials
+# Generates claude_desktop_config.json with the correct absolute paths.
+#
+# No credentials are written into it: the server reads outlook_mcp.toml itself,
+# from the project root, whatever directory Claude Desktop spawns it in.
 #
 # Usage:
 #   ./scripts/generate-claude-config.sh              # Generates config to stdout
@@ -81,68 +84,17 @@ if [ ! -f "$SERVER_SCRIPT" ]; then
 fi
 
 # =============================================================================
-# Load .env file
+# Warn if the server has nothing to run as
 # =============================================================================
 
-ENV_FILE="$PROJECT_ROOT/.env"
+CONFIG_FILE="$PROJECT_ROOT/outlook_mcp.toml"
 
-if [ ! -f "$ENV_FILE" ]; then
-    echo -e "${RED}ERROR: .env file not found!${NC}"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${YELLOW}WARNING: outlook_mcp.toml not found.${NC}"
+    echo -e "${GRAY}  The generated config is still correct, but the server will have${NC}"
+    echo -e "${GRAY}  no credentials until you create it:${NC}"
+    echo -e "${WHITE}    cp outlook_mcp.toml.example outlook_mcp.toml${NC}"
     echo ""
-    echo -e "${YELLOW}Please create a .env file:${NC}"
-    echo -e "${WHITE}  cp .env.example .env${NC}"
-    echo -e "${GRAY}  # Then edit .env with your Azure AD credentials${NC}"
-    echo ""
-    exit 1
-fi
-
-echo -e "${GRAY}Loading credentials from .env...${NC}"
-
-declare -A ENV_VARS
-
-while IFS= read -r line || [ -n "$line" ]; do
-    # Trim whitespace
-    line=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-    # Skip empty lines and comments
-    if [ -z "$line" ] || [[ "$line" =~ ^# ]]; then
-        continue
-    fi
-
-    # Parse KEY=VALUE format
-    if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
-        key="${BASH_REMATCH[1]}"
-        value="${BASH_REMATCH[2]}"
-
-        # Trim whitespace
-        key=$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-        value=$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-        # Remove quotes if present
-        value=$(echo "$value" | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//')
-
-        ENV_VARS[$key]="$value"
-    fi
-done < "$ENV_FILE"
-
-# Validate required vars
-REQUIRED_VARS=("OUTLOOK_CLIENT_ID" "OUTLOOK_CLIENT_SECRET" "OUTLOOK_TENANT_ID")
-MISSING=()
-
-for var in "${REQUIRED_VARS[@]}"; do
-    if [ -z "${ENV_VARS[$var]}" ]; then
-        MISSING+=("$var")
-    fi
-done
-
-if [ ${#MISSING[@]} -gt 0 ]; then
-    echo -e "${RED}ERROR: Missing or empty values in .env:${NC}"
-    for var in "${MISSING[@]}"; do
-        echo -e "${YELLOW}  - $var${NC}"
-    done
-    echo ""
-    echo -e "${CYAN}Edit your .env file and set these values.${NC}"
-    exit 1
 fi
 
 # =============================================================================
@@ -156,21 +108,9 @@ escape_json() {
 
 VENV_PYTHON_ESCAPED=$(escape_json "$VENV_PYTHON")
 SERVER_SCRIPT_ESCAPED=$(escape_json "$SERVER_SCRIPT")
-CLIENT_ID_ESCAPED=$(escape_json "${ENV_VARS[OUTLOOK_CLIENT_ID]}")
-CLIENT_SECRET_ESCAPED=$(escape_json "${ENV_VARS[OUTLOOK_CLIENT_SECRET]}")
-TENANT_ID_ESCAPED=$(escape_json "${ENV_VARS[OUTLOOK_TENANT_ID]}")
 
-# Build env section with optional OUTLOOK_DOWNLOAD_PATH
-ENV_JSON_LINES="        \"OUTLOOK_CLIENT_ID\": \"$CLIENT_ID_ESCAPED\",
-        \"OUTLOOK_CLIENT_SECRET\": \"$CLIENT_SECRET_ESCAPED\",
-        \"OUTLOOK_TENANT_ID\": \"$TENANT_ID_ESCAPED\""
-
-if [ -n "${ENV_VARS[OUTLOOK_DOWNLOAD_PATH]}" ]; then
-    DOWNLOAD_PATH_ESCAPED=$(escape_json "${ENV_VARS[OUTLOOK_DOWNLOAD_PATH]}")
-    ENV_JSON_LINES="$ENV_JSON_LINES,
-        \"OUTLOOK_DOWNLOAD_PATH\": \"$DOWNLOAD_PATH_ESCAPED\""
-fi
-
+# No "env" block: the server reads outlook_mcp.toml itself. Point a particular
+# host at a different file by adding "--config", "<path>" to args.
 JSON=$(cat <<EOF
 {
   "mcpServers": {
@@ -178,10 +118,7 @@ JSON=$(cat <<EOF
       "command": "$VENV_PYTHON_ESCAPED",
       "args": [
         "$SERVER_SCRIPT_ESCAPED"
-      ],
-      "env": {
-$ENV_JSON_LINES
-      }
+      ]
     }
   }
 }
@@ -273,7 +210,5 @@ echo ""
 echo -e "${GRAY}Paths used:${NC}"
 echo -e "${DARK_GRAY}  Python:  $VENV_PYTHON${NC}"
 echo -e "${DARK_GRAY}  Server:  $SERVER_SCRIPT${NC}"
-CLIENT_ID_SHORT="${ENV_VARS[OUTLOOK_CLIENT_ID]:0:8}"
-echo -e "${DARK_GRAY}  Client:  ${CLIENT_ID_SHORT}...${NC}"
-echo -e "${DARK_GRAY}  Tenant:  ${ENV_VARS[OUTLOOK_TENANT_ID]}${NC}"
+echo -e "${DARK_GRAY}  Config:  $CONFIG_FILE${NC}"
 echo ""

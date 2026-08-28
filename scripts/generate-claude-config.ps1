@@ -1,6 +1,9 @@
 # Outlook MCP - Claude Desktop Config Generator
 # ===============================================
-# Generates claude_desktop_config.json with correct paths and credentials
+# Generates claude_desktop_config.json with the correct absolute paths.
+#
+# No credentials are written into it: the server reads outlook_mcp.toml itself,
+# from the project root, whatever directory Claude Desktop spawns it in.
 #
 # Usage:
 #   .\scripts\generate-claude-config.ps1              # Generates config to stdout
@@ -52,71 +55,30 @@ if (-not (Test-Path $serverScript)) {
 }
 
 # =============================================================================
-# Load .env file
+# Warn if the server has nothing to run as
 # =============================================================================
 
-$envFile = Join-Path $projectRoot ".env"
+$configFile = Join-Path $projectRoot "outlook_mcp.toml"
 
-if (-not (Test-Path $envFile)) {
-    Write-Host "ERROR: .env file not found!" -ForegroundColor Red
+if (-not (Test-Path $configFile)) {
+    Write-Host "WARNING: outlook_mcp.toml not found." -ForegroundColor Yellow
+    Write-Host "  The generated config is still correct, but the server will have" -ForegroundColor Gray
+    Write-Host "  no credentials until you create it:" -ForegroundColor Gray
+    Write-Host "    Copy-Item outlook_mcp.toml.example outlook_mcp.toml" -ForegroundColor White
     Write-Host ""
-    Write-Host "Please create a .env file:" -ForegroundColor Yellow
-    Write-Host "  Copy-Item .env.example .env" -ForegroundColor White
-    Write-Host "  # Then edit .env with your Azure AD credentials" -ForegroundColor Gray
-    Write-Host ""
-    exit 1
-}
-
-Write-Host "Loading credentials from .env..." -ForegroundColor Gray
-
-$envVars = @{}
-
-Get-Content $envFile | ForEach-Object {
-    $line = $_.Trim()
-    if ($line -eq "" -or $line.StartsWith("#")) { return }
-
-    if ($line -match "^([^=]+)=(.*)$") {
-        $key = $matches[1].Trim()
-        $value = $matches[2].Trim() -replace '^["'']|["'']$', ''
-        $envVars[$key] = $value
-    }
-}
-
-# Validate required vars
-$requiredVars = @("OUTLOOK_CLIENT_ID", "OUTLOOK_CLIENT_SECRET", "OUTLOOK_TENANT_ID")
-$missing = $requiredVars | Where-Object { -not $envVars[$_] -or [string]::IsNullOrWhiteSpace($envVars[$_]) }
-
-if ($missing.Count -gt 0) {
-    Write-Host "ERROR: Missing or empty values in .env:" -ForegroundColor Red
-    foreach ($var in $missing) {
-        Write-Host "  - $var" -ForegroundColor Yellow
-    }
-    Write-Host ""
-    Write-Host "Edit your .env file and set these values." -ForegroundColor Cyan
-    exit 1
 }
 
 # =============================================================================
 # Build config object
 # =============================================================================
 
-$envConfig = @{
-    OUTLOOK_CLIENT_ID     = $envVars["OUTLOOK_CLIENT_ID"]
-    OUTLOOK_CLIENT_SECRET = $envVars["OUTLOOK_CLIENT_SECRET"]
-    OUTLOOK_TENANT_ID     = $envVars["OUTLOOK_TENANT_ID"]
-}
-
-# Add optional OUTLOOK_DOWNLOAD_PATH if present
-if ($envVars["OUTLOOK_DOWNLOAD_PATH"] -and -not [string]::IsNullOrWhiteSpace($envVars["OUTLOOK_DOWNLOAD_PATH"])) {
-    $envConfig["OUTLOOK_DOWNLOAD_PATH"] = $envVars["OUTLOOK_DOWNLOAD_PATH"]
-}
-
+# No "env" block: the server reads outlook_mcp.toml itself. Point a particular
+# host at a different file by adding "--config", "<path>" to args.
 $config = @{
     mcpServers = @{
         MS_Outlook_MCP = @{
             command = $venvPython
             args    = @($serverScript)
-            env     = $envConfig
         }
     }
 }
@@ -191,7 +153,5 @@ Write-Host ""
 Write-Host "Paths used:" -ForegroundColor Gray
 Write-Host "  Python:  $venvPython" -ForegroundColor DarkGray
 Write-Host "  Server:  $serverScript" -ForegroundColor DarkGray
-Write-Host "  Client:  " -NoNewline -ForegroundColor DarkGray
-Write-Host ($envVars["OUTLOOK_CLIENT_ID"].Substring(0, [Math]::Min(8, $envVars["OUTLOOK_CLIENT_ID"].Length)) + "...") -ForegroundColor DarkGray
-Write-Host "  Tenant:  $($envVars["OUTLOOK_TENANT_ID"])" -ForegroundColor DarkGray
+Write-Host "  Config:  $configFile" -ForegroundColor DarkGray
 Write-Host ""

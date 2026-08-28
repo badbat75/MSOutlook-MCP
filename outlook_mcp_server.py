@@ -4,18 +4,16 @@ Outlook MCP Server - Entry Point
 =================================
 Runs the MCP server from the outlook_mcp package. Exactly equivalent to the
 ``outlook-mcp`` console script installed by ``pip install .``: both call
-``outlook_mcp.server.main()``, which loads the project .env, reads the
-configuration file and starts the transport it names.
+``outlook_mcp.server.main()``, which reads the configuration file and starts
+the transport it names.
 
 Usage:
     python outlook_mcp_server.py                      # transport from outlook_mcp.toml
     python outlook_mcp_server.py --config /etc/x.toml # explicit configuration file
-    python outlook_mcp_server.py --env-file /etc/x.env
 
-The transport (stdio or http) and the HTTP bind host/port are read from the
-TOML configuration file (see outlook_mcp.toml.example), never from flags.
-Credentials come from OUTLOOK_* environment variables in stdio mode and from
-the X-Outlook-* request headers in HTTP mode.
+Everything the server needs is in that TOML file (see outlook_mcp.toml.example):
+the transport, the HTTP bind host and port, and the Azure AD app registration.
+No credential is ever read from the environment or taken from a request.
 """
 
 from outlook_mcp.server import main

@@ -3,26 +3,73 @@
 # Copy this file to outlook_mcp.toml (next to outlook_mcp_server.py) and edit.
 # outlook_mcp.toml is gitignored: each deployment keeps its own copy.
 #
+# This is the ONLY place the server is configured. It reads nothing from the
+# environment except $OUTLOOK_MCP_CONFIG, which says where this file is, and it
+# never accepts a credential from a request.
+#
 # The file is looked up in this order:
 #   1. --config PATH                     (command line)
 #   2. $OUTLOOK_MCP_CONFIG               (environment variable)
 #   3. <project root>/outlook_mcp.toml   (this location)
-# With no file at all the server runs on stdio.
-#
-# Credentials do NOT go here:
-#   - stdio: OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET / OUTLOOK_TENANT_ID
-#            environment variables (see .env.example)
-#   - http:  X-Outlook-Client-Id / X-Outlook-Client-Secret / X-Outlook-Tenant-Id
-#            request headers sent by the MCP client on every call
+# With no file at all the server runs on stdio with no credentials: it starts,
+# and says what is missing on the first tool call.
 
 [server]
 # "stdio" (Claude Desktop, Claude Code, daemons that spawn the process)
 # or "http" (streamable HTTP endpoint at http://<bind_host>:<bind_port>/mcp)
 transport = "stdio"
 
-# HTTP only. Use "127.0.0.1" for local clients, "0.0.0.0" to accept
-# connections from other machines (put it behind TLS / a reverse proxy).
+# HTTP only, and loopback only. Over HTTP a request carries no credential: it
+# says which mailbox it is addressing, in a header the reverse proxy in front
+# of the server appends after authenticating the user. That header is worth
+# believing only because the proxy replaces whatever the client sent, so the
+# server refuses to start bound anywhere a client could reach it directly.
 bind_host = "127.0.0.1"
 
 # HTTP only.
 bind_port = 8000
+
+# HTTP only: the Host header values a reverse proxy forwards. Needed because a
+# loopback bind makes the MCP SDK turn on DNS-rebinding protection, after which
+# it answers 421 "Invalid Host header" to anything but localhost. Nginx's
+# default `proxy_set_header Host $host` sends the site's own name, so name it
+# here. Leave the key out when no proxy fronts the server: an empty list is the
+# same as not setting it, and the SDK's own rule applies.
+# allowed_hosts = ["mcp.example.com"]
+
+[credentials]
+# The Azure AD app registration the server runs as, for every user it serves.
+# See docs/SETUP.md step 1 for how to create it.
+client_id = "your-client-id"
+client_secret = "your-client-secret"
+tenant_id = "common"          # or your directory (tenant) ID
+
+[auth]
+# HTTP only: the header the reverse proxy puts the authenticated user in.
+# oauth2-proxy uses X-Auth-Request-Email, Authelia Remote-Email.
+user_header = "X-Auth-Email"
+
+# Where the MSAL token caches go: one file per enrolled mailbox, plus
+# shared.json for a single-account stdio server. Either transport, and absolute.
+# Left unset they live under the home directory, as ~/.outlook_mcp/caches and
+# ~/.outlook_mcp_token_cache.json, which is the right shape on a personal
+# machine. Set it when the deployment owns a directory of its own: repeating
+# the package name inside one is noise, not namespacing.
+# cache_dir = "/opt/outlook-mcp/data/caches"
+
+# HTTP only, optional: the absolute URL users reach this server on. Setting it
+# turns on two things. Browser enrollment, so each user can authorize their own
+# mailbox at <public_url>/oauth/login instead of an operator running
+# `outlook-mcp-auth --user` for them: <public_url>/oauth/callback must then be
+# registered as a redirect URI on the app registration above. And attachment
+# downloads, so outlook_get_attachment answers a remote caller with a one-time
+# link at <public_url>/attachments/<token> instead of a path on this machine
+# that the caller cannot open.
+# public_url = "https://outlook-mcp.example.com"
+
+[attachments]
+# Where downloaded attachments are written. Server side on purpose: over HTTP a
+# remote caller must never get to choose where the server writes files. Under
+# this directory each user gets one of their own, and each message one below
+# that, which is what outlook_delete_attachment_files empties.
+# download_path = "~/Downloads/outlook_attachments"

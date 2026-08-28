@@ -15,10 +15,11 @@ Three authorization modes:
 3. Direct mode - Provide authorization code or callback URL directly
    python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 
-Credentials required (from the project .env, or already in the environment):
-    OUTLOOK_CLIENT_ID      - Azure AD App client ID
-    OUTLOOK_CLIENT_SECRET  - Azure AD App client secret
-    OUTLOOK_TENANT_ID      - Azure AD tenant ID (or 'common' for multi-tenant)
+4. Per user, for an HTTP deployment where a reverse proxy names the user
+   outlook-mcp-auth --user someone@example.com
+
+The app registration comes from the same outlook_mcp.toml the server reads, so
+authorizing needs no separate setup step.
 
 This is the only place the authorization code flow lives. It talks to MSAL
 directly rather than through AuthManager: that class serves an already
@@ -28,9 +29,9 @@ refresh, which is the wrong behaviour for a first sign-in.
 
 import argparse
 import json
-import os
 import sys
 import webbrowser
+from html import escape
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -39,11 +40,13 @@ import msal
 from .auth import (
     GRAPH_SCOPE_URLS,
     REDIRECT_URI,
-    TOKEN_CACHE_PATH,
     authority_for,
     load_token_cache,
+    save_token_cache,
+    shared_cache_path,
+    user_cache_path,
 )
-from .env import load_project_env
+from .config import CONFIG_FILENAME, ConfigError, load_config
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
@@ -69,8 +72,11 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 </body></html>
             """)
         elif "error" in params:
-            error = params.get("error", ["unknown"])[0]
-            desc = params.get("error_description", [""])[0]
+            # Escaped because it is a query string being echoed back, even
+            # though this listener answers on loopback for a few seconds and
+            # only to the person who started it.
+            error = escape(params.get("error", ["unknown"])[0])
+            desc = escape(params.get("error_description", [""])[0])
             self.send_response(400)
             self.send_header("Content-type", "text/html")
             self.end_headers()
@@ -89,22 +95,22 @@ class CallbackHandler(BaseHTTPRequestHandler):
         pass  # Suppress default logging
 
 
-def _print_credentials_help(env_file) -> None:
+def _print_credentials_help(source) -> None:
     """Explain how to get the credentials this command needs."""
     print("=" * 60)
     print("ERROR: Azure AD credentials not set!")
     print("=" * 60)
     print()
-    if env_file:
-        print(f"Read {env_file}, but OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET")
-        print("are empty there.")
+    if source:
+        print(f"Read {source}, but it has no [credentials] table.")
     else:
-        print("No .env file found. Copy .env.example to .env and fill it in,")
-        print("or export the variables yourself:")
+        print(f"No {CONFIG_FILENAME} found. Copy {CONFIG_FILENAME}.example to")
+        print(f"{CONFIG_FILENAME} in the project root and fill it in.")
     print()
-    print("  OUTLOOK_CLIENT_ID='your-client-id'")
-    print("  OUTLOOK_CLIENT_SECRET='your-client-secret'")
-    print("  OUTLOOK_TENANT_ID='your-tenant-id'  # or 'common'")
+    print("  [credentials]")
+    print("  client_id = 'your-client-id'")
+    print("  client_secret = 'your-client-secret'")
+    print("  tenant_id = 'common'")
     print()
     print("To get these values:")
     print("  1. Go to https://entra.microsoft.com")
@@ -112,10 +118,10 @@ def _print_credentials_help(env_file) -> None:
     print("  3. Click 'New registration'")
     print("  4. Name: 'Outlook MCP Server'")
     print("  5. Supported account types: pick your preference")
-    print(f"  6. Redirect URI: Web → {REDIRECT_URI}")
+    print(f"  6. Redirect URI: Web > {REDIRECT_URI}")
     print("  7. After creation, copy the Application (client) ID")
-    print("  8. Go to 'Certificates & secrets' → New client secret")
-    print("  9. Go to 'API permissions' → Add permission → Microsoft Graph:")
+    print("  8. Go to 'Certificates & secrets' > New client secret")
+    print("  9. Go to 'API permissions' > Add permission > Microsoft Graph:")
     for scope in GRAPH_SCOPE_URLS:
         name = scope.split("/")[-1]
         print(f"     - {name} (Delegated)")
@@ -131,7 +137,23 @@ def _auth_response_from(value: str) -> dict:
     return {"code": value}
 
 
+def _survive_a_narrow_console() -> None:
+    """Never let a character this console cannot render abort a sign-in.
+
+    A Windows console is cp1252, and printing anything outside it raises
+    UnicodeEncodeError mid-flow: an arrow in the setup instructions used to kill
+    the run after the browser had already opened. The output here is plain ASCII
+    for that reason, and this makes a future slip degrade to '?' instead of
+    losing the authorization.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def main():
+    _survive_a_narrow_console()
+
     parser = argparse.ArgumentParser(description="Outlook MCP OAuth2 Setup")
     parser.add_argument(
         "--no-browser",
@@ -143,40 +165,83 @@ def main():
         type=str,
         help="Manually provide the authorization code or full callback URL",
     )
+    parser.add_argument(
+        "--user",
+        metavar="EMAIL",
+        help=(
+            "Authorize on behalf of one user of an HTTP deployment, writing that "
+            "user's own token cache instead of the shared one. The address is the "
+            "one the reverse proxy puts in its user header."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help=(
+            "Path to the TOML configuration file holding [credentials]. Defaults "
+            "to $OUTLOOK_MCP_CONFIG, then outlook_mcp.toml in the project root."
+        ),
+    )
     args = parser.parse_args()
 
-    # The same .env the server reads, so authorizing needs no separate setup
-    # step. Variables already exported in the shell keep precedence.
-    env_file = load_project_env()
-    client_id = os.environ.get("OUTLOOK_CLIENT_ID", "")
-    client_secret = os.environ.get("OUTLOOK_CLIENT_SECRET", "")
-    tenant_id = os.environ.get("OUTLOOK_TENANT_ID", "common")
+    # The same configuration file the server reads, so authorizing needs no
+    # separate setup step. It has to come first: it is also what says where the
+    # caches live, so writing one before reading it would put this run's tokens
+    # somewhere the server never looks.
+    try:
+        config = load_config(args.config)
+    except ConfigError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(2)
 
-    if not client_id or not client_secret:
-        _print_credentials_help(env_file)
+    # Which cache this run fills. The shared file is the stdio default; --user is
+    # the multi-user deployment, where every mailbox gets its own.
+    cache_dir = config.cache_directory
+    cache_path = (
+        user_cache_path(args.user, cache_dir) if args.user
+        else shared_cache_path(cache_dir)
+    )
+
+    if not config.has_credentials:
+        _print_credentials_help(config.source)
         sys.exit(1)
 
-    # Initialize MSAL
-    cache = load_token_cache()
+    client_id = config.client_id
+    client_secret = config.client_secret
+    tenant_id = config.tenant_id
 
-    app = msal.ConfidentialClientApplication(
-        client_id=client_id,
-        client_credential=client_secret,
-        authority=authority_for(tenant_id),
-        token_cache=cache,
-    )
+    def build_app(token_cache):
+        return msal.ConfidentialClientApplication(
+            client_id=client_id,
+            client_credential=client_secret,
+            authority=authority_for(tenant_id),
+            token_cache=token_cache,
+        )
+
+    # Initialize MSAL
+    cache = load_token_cache(cache_path)
+    app = build_app(cache)
 
     # Check if we already have a valid token
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(GRAPH_SCOPE_URLS, account=accounts[0])
         if result and "access_token" in result:
-            print("✅ Already authenticated! Token is still valid.")
+            print("OK: already authenticated, the token is still valid.")
             print(f"   Account: {accounts[0].get('username', 'unknown')}")
-            print(f"   Token cache: {TOKEN_CACHE_PATH}")
+            print(f"   Token cache: {cache_path}")
             if cache.has_state_changed:
-                TOKEN_CACHE_PATH.write_text(cache.serialize())
+                save_token_cache(cache, cache_path)
             return
+
+    if args.user:
+        # One file, one account. A per-user cache that accumulated two accounts
+        # would leave get_accounts() picking between them arbitrarily, so a new
+        # sign-in for this user replaces the previous grant instead of joining
+        # it. The shared cache is different: it legitimately holds one account
+        # per app registration, keyed by client id.
+        cache = msal.SerializableTokenCache()
+        app = build_app(cache)
 
     # Start auth code flow
     flow = app.initiate_auth_code_flow(
@@ -196,7 +261,7 @@ def main():
     print()
 
     if args.no_browser:
-        print("🔗 MANUAL AUTHORIZATION REQUIRED")
+        print("MANUAL AUTHORIZATION REQUIRED")
         print()
         print("Copy this URL and open it on ANY device with a browser:")
         print()
@@ -234,7 +299,7 @@ def main():
 
         if not callback_url:
             print()
-            print("❌ No URL provided. Exiting.")
+            print("ERROR: no URL provided. Exiting.")
             sys.exit(1)
         auth_response = _auth_response_from(callback_url)
 
@@ -242,7 +307,7 @@ def main():
         # Normal mode: callback server with Ctrl+C fallback
         print("Waiting for authorization callback on http://localhost:5000 ...")
         print()
-        print("💡 TIP: If the callback doesn't work, press Ctrl+C to paste manually")
+        print("TIP: if the callback doesn't work, press Ctrl+C to paste manually")
         print()
 
         server = HTTPServer(("localhost", 5000), CallbackHandler)
@@ -273,7 +338,7 @@ def main():
 
             if not callback_url:
                 print()
-                print("❌ No URL provided. Exiting.")
+                print("ERROR: no URL provided. Exiting.")
                 sys.exit(1)
             auth_response = _auth_response_from(callback_url)
 
@@ -281,18 +346,26 @@ def main():
 
     if "access_token" in result:
         # Save cache
-        TOKEN_CACHE_PATH.write_text(cache.serialize())
+        save_token_cache(cache, cache_path)
 
         print()
-        print("✅ Authentication successful!")
-        print(f"   Token cache saved to: {TOKEN_CACHE_PATH}")
-        print(f"   Scopes granted: {', '.join(result.get('scope', []))}")
+        print("OK: authentication successful.")
+        if args.user:
+            print(f"   Authorized for: {args.user}")
+        print(f"   Token cache saved to: {cache_path}")
+        # MSAL hands back whatever AAD sent: a space delimited string here, a
+        # list in other flows. Joining the string would print it one character
+        # at a time.
+        granted = result.get("scope") or []
+        if isinstance(granted, str):
+            granted = granted.split()
+        print(f"   Scopes granted: {', '.join(granted)}")
         print()
         print("You can now start the MCP server:")
         print("   python outlook_mcp_server.py")
     else:
         print()
-        print("❌ Authentication failed!")
+        print("ERROR: authentication failed.")
         print(f"   Error: {result.get('error', 'unknown')}")
         print(f"   Description: {result.get('error_description', 'N/A')}")
         sys.exit(1)

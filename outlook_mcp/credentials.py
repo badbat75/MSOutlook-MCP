@@ -1,31 +1,38 @@
-"""Where a request's Azure AD credentials come from, and the clients they own.
+"""Whose mailbox a request acts on, and the Graph clients that serve it.
 
-The transport decides the source, not a flag. Over HTTP the SDK attaches the
-Starlette request to the tool context and the ``X-Outlook-*`` headers of that
-request are authoritative; over stdio there is no request object and the
-``OUTLOOK_*`` variables read at startup are used.
+The server has exactly one Azure AD app registration, read from its
+configuration file, and it never accepts one from a caller. What varies per
+request is only *whose* mailbox is being addressed:
+
+* Over **stdio** there is no request and no ambiguity. The process was started
+  by one person, on their own machine or under their own account, and the
+  operating system user is the whole authentication story: whoever can spawn
+  the server can already read its configuration and its token cache.
+
+* Over **HTTP** a reverse proxy authenticates the user and appends the user
+  header itself. The header carries no proof, and needs none, because the
+  server listens on loopback only and the proxy is therefore the sole route in,
+  which config.py enforces at startup. Each user gets a token cache of their
+  own, so one person's grant is never served to another.
 """
 
 import logging
-import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Mapping, Optional
 
 from mcp.server.mcpserver import Context
 
-from .auth import AuthManager, CredentialsError, GraphClient, load_token_cache
+from .auth import (
+    AuthManager,
+    CredentialsError,
+    GraphClient,
+    load_token_cache,
+    shared_cache_path,
+    user_cache_path,
+)
 
 logger = logging.getLogger("outlook_mcp")
-
-HEADER_CLIENT_ID = "X-Outlook-Client-Id"
-HEADER_CLIENT_SECRET = "X-Outlook-Client-Secret"
-HEADER_TENANT_ID = "X-Outlook-Tenant-Id"
-
-ENV_CLIENT_ID = "OUTLOOK_CLIENT_ID"
-ENV_CLIENT_SECRET = "OUTLOOK_CLIENT_SECRET"
-ENV_TENANT_ID = "OUTLOOK_TENANT_ID"
-
-DEFAULT_TENANT_ID = "common"
 
 
 @dataclass(frozen=True)
@@ -34,72 +41,97 @@ class Credentials:
 
     client_id: str
     client_secret: str
-    tenant_id: str = DEFAULT_TENANT_ID
+    tenant_id: str
 
 
-def credentials_from_env(environ: Mapping[str, str] = os.environ) -> Optional[Credentials]:
-    """Read credentials from OUTLOOK_* variables; None when incomplete."""
-    client_id = environ.get(ENV_CLIENT_ID, "").strip()
-    client_secret = environ.get(ENV_CLIENT_SECRET, "").strip()
-    if not client_id or not client_secret:
+def credentials_from_config(config) -> Optional[Credentials]:
+    """The app registration the server runs as, or None when unconfigured."""
+    if not config.has_credentials:
         return None
-    tenant_id = environ.get(ENV_TENANT_ID, "").strip() or DEFAULT_TENANT_ID
-    return Credentials(client_id, client_secret, tenant_id)
+    return Credentials(config.client_id, config.client_secret, config.tenant_id)
 
 
-def credentials_from_headers(headers: Mapping[str, str]) -> Credentials:
-    """Read credentials from the X-Outlook-* request headers (case-insensitive).
+@dataclass(frozen=True)
+class ProxyAuthPolicy:
+    """The identity a reverse proxy asserts, and where to read it.
 
-    Raises CredentialsError naming the missing headers, so a misconfigured
-    client sees exactly what to send instead of a generic auth failure.
+    There is deliberately nothing here that authenticates the proxy: the header
+    is believed because the server listens on loopback only and the proxy is
+    therefore the sole route in, which config.py enforces at startup. Putting a
+    second check here would suggest the mode is safe without that, and it is not.
     """
-    # Starlette's Headers are already case-insensitive; normalising here keeps
-    # the function correct for any plain Mapping too (tests, other frameworks).
-    lowered = {str(k).lower(): v for k, v in headers.items()}
-    client_id = (lowered.get(HEADER_CLIENT_ID.lower()) or "").strip()
-    client_secret = (lowered.get(HEADER_CLIENT_SECRET.lower()) or "").strip()
-    missing = [
-        name for name, value in (
-            (HEADER_CLIENT_ID, client_id),
-            (HEADER_CLIENT_SECRET, client_secret),
-        ) if not value
-    ]
-    if missing:
-        raise CredentialsError(
-            f"Missing required HTTP header(s): {', '.join(missing)}. In HTTP mode the "
-            f"Azure AD credentials must be sent with every request as "
-            f"{HEADER_CLIENT_ID}, {HEADER_CLIENT_SECRET} and (optionally) "
-            f"{HEADER_TENANT_ID}; environment variables are not consulted."
-        )
-    tenant_id = (lowered.get(HEADER_TENANT_ID.lower()) or "").strip() or DEFAULT_TENANT_ID
-    return Credentials(client_id, client_secret, tenant_id)
+
+    user_header: str
+
+    def user_from_headers(self, headers: Mapping[str, str]) -> str:
+        """The address the proxy vouched for, or CredentialsError."""
+        # Starlette's Headers are already case-insensitive; normalising here
+        # keeps the method correct for a plain Mapping too (tests, other
+        # frameworks), and for a proxy that spells the header its own way.
+        lowered = {str(k).lower(): v for k, v in headers.items()}
+        user = (lowered.get(self.user_header.lower()) or "").strip()
+        if not user:
+            raise CredentialsError(
+                f"No {self.user_header} header on this request. The reverse proxy "
+                f"in front of this server sets it once it has authenticated the "
+                f"user; a request arriving without it cannot be attributed to a "
+                f"mailbox."
+            )
+        return user
+
+
+@dataclass(frozen=True)
+class Principal:
+    """Whose mailbox a request acts on, and with which app registration.
+
+    ``user`` is set only over HTTP, where one app registration serves everyone
+    and the enrolled person is what distinguishes one caller from the next. Over
+    stdio there is only ever one person and it stays None. The pair is the
+    pool's key, so two people are never one client.
+    """
+
+    credentials: Credentials
+    user: Optional[str] = None
 
 
 class GraphClientPool:
-    """One GraphClient per distinct set of credentials, created on first use.
+    """One GraphClient per principal, created on first use.
 
-    In stdio mode the pool only ever holds the environment credentials. In HTTP
-    mode each caller supplies its own headers, so the pool keeps a client per
-    app registration and all of them share one MSAL token cache (tokens are
-    keyed by client id inside the cache, and one serialize() persists them all).
+    Over stdio the pool only ever holds one entry, backed by the single token
+    cache the authorization command writes. Over HTTP the app registration is
+    the same for everyone, so sharing one cache would be a leak: MSAL indexes
+    its entries by client id, every account would land in the same cache, and
+    get_accounts() would return an arbitrary one. Each user therefore gets a
+    cache object of its own, loaded from and written back to its own file.
     """
 
-    def __init__(self):
-        self._token_cache = load_token_cache()
-        self._clients: Dict[Credentials, GraphClient] = {}
+    def __init__(self, cache_dir: Optional[Path] = None):
+        # None means the home directory default, which is what auth.py applies.
+        self._cache_dir = cache_dir
+        self._shared_path = shared_cache_path(cache_dir)
+        self._token_cache = load_token_cache(self._shared_path)
+        self._clients: Dict[Principal, GraphClient] = {}
 
-    def get(self, creds: Credentials) -> GraphClient:
-        client = self._clients.get(creds)
+    def get(self, principal: Principal) -> GraphClient:
+        client = self._clients.get(principal)
         if client is None:
+            creds = principal.credentials
+            if principal.user is None:
+                cache, cache_path = self._token_cache, self._shared_path
+            else:
+                cache_path = user_cache_path(principal.user, self._cache_dir)
+                cache = load_token_cache(cache_path)
             auth = AuthManager(
                 creds.client_id, creds.client_secret, creds.tenant_id,
-                token_cache=self._token_cache,
+                token_cache=cache,
+                cache_path=cache_path,
+                user=principal.user,
             )
             client = GraphClient(auth)
-            self._clients[creds] = client
+            self._clients[principal] = client
             logger.info(
-                "Created Graph client for client_id=%s... tenant=%s",
-                creds.client_id[:8], creds.tenant_id,
+                "Created Graph client for client_id=%s... tenant=%s user=%s",
+                creds.client_id[:8], creds.tenant_id, principal.user or "-",
             )
         return client
 
@@ -109,25 +141,35 @@ class GraphClientPool:
         self._clients.clear()
 
 
-def get_graph(ctx: Context) -> GraphClient:
-    """Resolve the GraphClient for the current request.
+def current_user(ctx: Context) -> Optional[str]:
+    """Whose mailbox the current request speaks for, or None over stdio.
 
-    The transport decides where credentials come from: over HTTP the SDK
-    attaches the Starlette request to the context and the X-Outlook-* headers
-    of that request are authoritative; over stdio there is no request object
-    and the OUTLOOK_* environment variables read at startup are used.
+    The transport answers it: over stdio there is no request object and no
+    ambiguity, over HTTP the SDK attaches the Starlette request and the identity
+    header the reverse proxy appended names the user. Tools that write or delete
+    files on the server ask this too, so that what belongs to one caller is
+    never handed to, or removed by, another.
     """
     request_context = ctx.request_context
-    pool: GraphClientPool = request_context.lifespan_context["pool"]
+    proxy_auth: Optional[ProxyAuthPolicy] = request_context.lifespan_context.get("proxy_auth")
     request = request_context.request
-    if request is not None and hasattr(request, "headers"):
-        creds = credentials_from_headers(request.headers)
-    else:
-        creds = request_context.lifespan_context["env_credentials"]
-        if creds is None:
-            raise CredentialsError(
-                f"{ENV_CLIENT_ID} and {ENV_CLIENT_SECRET} are not set. Configure them in "
-                f"the environment of the MCP server (e.g. the \"env\" block of the Claude "
-                f"Desktop config) and restart the server."
-            )
-    return pool.get(creds)
+
+    if request is None or not hasattr(request, "headers") or proxy_auth is None:
+        return None
+    return proxy_auth.user_from_headers(request.headers)
+
+
+def get_graph(ctx: Context) -> GraphClient:
+    """Resolve the GraphClient for the current request."""
+    lifespan_context = ctx.request_context.lifespan_context
+
+    credentials: Optional[Credentials] = lifespan_context["credentials"]
+    if credentials is None:
+        raise CredentialsError(
+            "This server has no Azure AD app registration configured. Set "
+            "client_id and client_secret under [credentials] in outlook_mcp.toml "
+            "and restart it."
+        )
+
+    pool: GraphClientPool = lifespan_context["pool"]
+    return pool.get(Principal(credentials, current_user(ctx)))
