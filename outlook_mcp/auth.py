@@ -62,6 +62,9 @@ class AuthManager:
         # one manager per set of header credentials); otherwise load our own.
         self._cache = token_cache if token_cache is not None else load_token_cache()
         self._app: Optional[msal.ConfidentialClientApplication] = None
+        # Whether AAD has confirmed this client secret at least once. Until it
+        # has, no token may be served out of the cache. See get_token().
+        self._secret_verified = False
 
     def _save_cache(self):
         """Persist token cache to disk."""
@@ -97,22 +100,61 @@ class AuthManager:
         self._save_cache()
         return result
 
+    def _unverified_client_app(self) -> msal.ConfidentialClientApplication:
+        """An app with a private, empty cache, so its calls always reach AAD.
+
+        Used for the app-only path before the secret has been proven: MSAL
+        refuses force_refresh on acquire_token_for_client, and a cache that
+        holds an app token would answer it locally without ever contacting AAD.
+        """
+        return msal.ConfidentialClientApplication(
+            client_id=self.client_id,
+            client_credential=self.client_secret,
+            authority=self.authority,
+        )
+
     async def get_token(self) -> str:
-        """Get a valid access token, refreshing if needed."""
+        """Get a valid access token, refreshing if needed.
+
+        The first token for a given set of credentials always costs one round
+        trip to AAD, because that request is where AAD authenticates the client
+        secret. MSAL keys cached tokens by client id alone (see the query built
+        in acquire_token_silent), never by secret, so handing one out before the
+        secret has been proven would let anyone who knows the client id, which
+        is not secret material, use another caller's token. That is reachable
+        only over HTTP, where the credentials arrive in request headers, but the
+        guard belongs here where the token is produced.
+        """
         scopes = [f"https://graph.microsoft.com/{s}" for s in GRAPH_SCOPES]
         accounts = self.app.get_accounts()
 
         if accounts:
-            result = self.app.acquire_token_silent(scopes, account=accounts[0])
+            # Redeeming the refresh token is a request AAD authenticates with
+            # the client secret, so forcing it is what proves ownership.
+            result = self.app.acquire_token_silent(
+                scopes, account=accounts[0], force_refresh=not self._secret_verified
+            )
             if result and "access_token" in result:
+                self._secret_verified = True
                 self._save_cache()
                 return result["access_token"]
+            if not self._secret_verified:
+                # A wrong secret and a stale refresh token look the same from
+                # here, and we must not fall through to a cached token, so both
+                # end as a credentials failure.
+                raise CredentialsError(
+                    "Could not obtain a token for this client id. Either the "
+                    "client secret is wrong, or the cached authorization has "
+                    "expired: re-run python outlook_mcp_auth.py."
+                )
 
-        # If no cached token, try client credentials (app-only)
-        result = self.app.acquire_token_for_client(
+        # No delegated account for this client id: client credentials (app-only).
+        app = self.app if self._secret_verified else self._unverified_client_app()
+        result = app.acquire_token_for_client(
             scopes=["https://graph.microsoft.com/.default"]
         )
         if result and "access_token" in result:
+            self._secret_verified = True
             self._save_cache()
             return result["access_token"]
 

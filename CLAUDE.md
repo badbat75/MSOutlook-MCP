@@ -310,6 +310,31 @@ first use; all of them share one MSAL token cache (entries are keyed by client
 id, one `serialize()` persists them all), so several app registrations can be
 served by one HTTP process as long as `outlook_mcp_auth.py` was run for each.
 
+### Secret Verification (do not remove)
+
+**An `AuthManager` never serves a token out of the MSAL cache until AAD has
+confirmed its client secret at least once.** MSAL keys cached tokens by client
+id and never by secret (`acquire_token_silent` builds its query from
+`client_id`, `environment`, `realm`, `home_account_id`), so without this rule a
+caller who sends a valid `X-Outlook-Client-Id`, which is not secret material,
+plus any string at all as the secret would be handed a working Graph token for
+as long as an access token stays cached. The pool keys on the full credential
+tuple, so the wrong secret gets its own unverified `AuthManager`.
+
+How it is enforced in `get_token()`:
+
+- Delegated path: the first call passes `force_refresh=True`, since redeeming
+  the refresh token is the request AAD authenticates the secret on. If it
+  fails, `CredentialsError` is raised; it must **not** fall through to a cached
+  token or to client credentials.
+- App-only path: MSAL rejects `force_refresh` on `acquire_token_for_client`, so
+  the first call goes through `_unverified_client_app()`, an application with a
+  private empty cache that therefore has to reach AAD.
+
+Both paths set `_secret_verified` on success, after which the cache is used
+normally. Cost: one extra token round trip per credential set per process.
+`tests/unit/test_auth.py` pins all of it.
+
 ### MCP Tool Categories
 
 **Email Tools (11):**
@@ -442,7 +467,7 @@ is never registered.
 
 - Server logs go to stderr (the SDK's `MCPServer` configures logging); the HTTP startup banner is printed to stderr too, never to stdout
 - Token cache issues: delete `~/.outlook_mcp_token_cache.json` and re-auth
-- "No valid token available" with a fresh cache and `AADSTS700016` from MSAL means the app registration behind the client id no longer exists in the directory: that is an Azure-side problem, not a code regression
+- "No valid token available", or "Could not obtain a token for this client id", together with `AADSTS700016` from MSAL, means the app registration behind the client id no longer exists in the directory: that is an Azure-side problem, not a code regression. The second message comes from the secret verification described above, which is the first thing to fail when the registration is gone
 - Graph API errors: check response body in exception (includes error code and message)
 - Rate limiting: Graph returns 429 with Retry-After header (not auto-handled currently)
 - The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it, which may not even be traversable by the server's user (e.g. a daemon started from another user's 0700 home). With mcp SDK 1.x this used to crash at startup because FastMCP's pydantic-settings probed `./.env`; SDK 2.x reads no `.env` / `MCP_*` at all, and every path this project resolves itself (`outlook_mcp.toml` via `config.DEFAULT_CONFIG_PATH`, the `.env` via `env.DEFAULT_ENV_PATH`) hangs off `env.PROJECT_ROOT`, which is `__file__`-derived. Keep it that way: no relative path, no `Path.cwd()`
