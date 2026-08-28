@@ -19,6 +19,7 @@ import httpx
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
 
 from .auth import AuthManager, GraphClient
 from .models import (
@@ -62,6 +63,15 @@ async def app_lifespan(app):
 
     await graph.close()
 
+
+# FastMCP's Settings (pydantic-settings) probes "./.env" relative to the
+# process CWD, which a stdio server inherits from whatever host spawned it.
+# When that directory is not traversable by the server's user (e.g. a daemon
+# launched from another user's 0700 home), the stat() raises PermissionError
+# inside FastMCP.__init__ and the server dies before the transport is up.
+# This server is configured through OUTLOOK_* environment variables only and
+# FastMCP passes every setting explicitly, so the dotenv lookup is pure risk.
+FastMCPSettings.model_config["env_file"] = None
 
 mcp = FastMCP("MS_Outlook_MCP", lifespan=app_lifespan)
 

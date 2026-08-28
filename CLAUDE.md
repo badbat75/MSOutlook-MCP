@@ -396,6 +396,7 @@ async def my_new_tool(params: MyNewToolInput, ctx: Context = None) -> str:
 - Token cache issues: delete `~/.outlook_mcp_token_cache.json` and re-auth
 - Graph API errors: check response body in exception (includes error code and message)
 - Rate limiting: Graph returns 429 with Retry-After header (not auto-handled currently)
+- The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it. FastMCP's `Settings` would otherwise `stat("./.env")` at construction time (pydantic-settings `env_file`), and a CWD the server user cannot traverse (e.g. a daemon started from another user's 0700 home) turns that into `PermissionError: [Errno 13] Permission denied: '.env'` before the transport is up. `server.py` disables that lookup (`FastMCPSettings.model_config["env_file"] = None`); configuration comes from `OUTLOOK_*` environment variables only
 
 ## Microsoft Graph API Quirks
 
