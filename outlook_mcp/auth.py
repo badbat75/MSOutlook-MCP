@@ -17,9 +17,21 @@ GRAPH_SCOPES = [
     "User.Read",
 ]
 
+# The same list as Graph expects it on the wire. Both the server and the
+# authorization flow request exactly these, so they are defined once.
+GRAPH_SCOPE_URLS = [f"https://graph.microsoft.com/{s}" for s in GRAPH_SCOPES]
+
+# Must match the redirect URI registered on the Azure AD app registration.
+REDIRECT_URI = "http://localhost:5000/callback"
+
 TOKEN_CACHE_PATH = Path.home() / ".outlook_mcp_token_cache.json"
 
 logger = logging.getLogger("outlook_mcp")
+
+
+def authority_for(tenant_id: str) -> str:
+    """The AAD authority URL for a tenant id (or "common")."""
+    return f"https://login.microsoftonline.com/{tenant_id}"
 
 
 class CredentialsError(RuntimeError):
@@ -57,7 +69,7 @@ class AuthManager:
         self.client_id = client_id
         self.client_secret = client_secret
         self.tenant_id = tenant_id
-        self.authority = f"https://login.microsoftonline.com/{tenant_id}"
+        self.authority = authority_for(tenant_id)
         # A caller may hand in a cache shared with other managers (HTTP mode,
         # one manager per set of header credentials); otherwise load our own.
         self._cache = token_cache if token_cache is not None else load_token_cache()
@@ -81,24 +93,6 @@ class AuthManager:
                 token_cache=self._cache,
             )
         return self._app
-
-    def get_auth_url(self) -> str:
-        """Generate the authorization URL for initial user consent."""
-        scopes = [f"https://graph.microsoft.com/{s}" for s in GRAPH_SCOPES]
-        flow = self.app.initiate_auth_code_flow(
-            scopes=scopes,
-            redirect_uri="http://localhost:5000/callback",
-        )
-        self._pending_flow = flow
-        return flow["auth_uri"]
-
-    def complete_auth(self, auth_response: dict) -> dict:
-        """Complete the auth flow with the callback response."""
-        result = self.app.acquire_token_by_auth_code_flow(
-            self._pending_flow, auth_response
-        )
-        self._save_cache()
-        return result
 
     def _unverified_client_app(self) -> msal.ConfidentialClientApplication:
         """An app with a private, empty cache, so its calls always reach AAD.
@@ -125,7 +119,7 @@ class AuthManager:
         only over HTTP, where the credentials arrive in request headers, but the
         guard belongs here where the token is produced.
         """
-        scopes = [f"https://graph.microsoft.com/{s}" for s in GRAPH_SCOPES]
+        scopes = GRAPH_SCOPE_URLS
         accounts = self.app.get_accounts()
 
         if accounts:

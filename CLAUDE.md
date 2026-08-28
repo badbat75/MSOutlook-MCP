@@ -25,6 +25,7 @@ OutlookMCP/
 │   ├── env.py                  # .env loader + PROJECT_ROOT, shared by every entry point
 │   ├── credentials.py          # Credentials, env/header readers, GraphClientPool, get_graph()
 │   ├── auth.py                 # AuthManager + GraphClient + shared MSAL token cache
+│   ├── authorize.py            # The OAuth2 authorization code flow (outlook-mcp-auth)
 │   ├── folders.py              # Well-known aliases, name lookup, folder tree rendering
 │   ├── attachments.py          # Inline (<=3MB) and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
@@ -51,12 +52,11 @@ OutlookMCP/
 │   ├── mcp_call.py             # Minimal stdio client for calling one tool by hand
 │   └── openclaw.json           # MCP host config for the openclaw Linux deployment
 ├── outlook_mcp_server.py       # Entry point wrapper (identical to the outlook-mcp command)
-├── outlook_mcp_auth.py         # OAuth2 initial authorization (standalone)
+├── outlook_mcp_auth.py         # Wrapper (identical to the outlook-mcp-auth command)
 ├── outlook_mcp.toml.example    # Server configuration template (copy to outlook_mcp.toml, gitignored)
 ├── pyproject.toml              # Package metadata, dependencies, pytest config
 ├── requirements.txt            # `-e .` only; versions live in pyproject.toml
-├── .env.example                # Credentials template
-└── claude_desktop_config_example.json
+└── .env.example                # Credentials template
 ```
 
 **Where things go.** A new tool goes in `tools/`, never in `server.py`:
@@ -65,11 +65,20 @@ not formatting belongs in its own module (`folders.py`, `attachments.py`),
 because the one-file version of this package reached 1441 lines and hid its
 seams.
 
+**Nothing in the repo root holds logic.** `outlook_mcp_server.py` and
+`outlook_mcp_auth.py` are three-line wrappers over `outlook_mcp.server:main`
+and `outlook_mcp.authorize:main`, kept because a daemon, a Claude Desktop
+config and every document name those paths. Put code in the package and give it
+a console script; a root file that grows a body ends up duplicating what the
+package already has, which is how `outlook_mcp_auth.py` came to own a second
+copy of the scope list, the authority URL and the token cache path.
+
 ## Authentication Flow
 
-The project uses a **two-script approach** for OAuth2:
+The project uses a **two-command approach** for OAuth2:
 
-1. **Initial Setup** (`outlook_mcp_auth.py`):
+1. **Initial Setup** (`outlook_mcp_auth.py`, or `outlook-mcp-auth`, both
+   `outlook_mcp/authorize.py`):
    - Run once to authorize the app
    - Supports three authorization modes:
      - **Normal mode** (default): Opens browser, waits for callback on port 5000, allows Ctrl+C to paste URL manually
@@ -291,7 +300,8 @@ claude mcp add --transport http outlook http://server:8000/mcp \
 | `outlook_mcp/env.py` | `PROJECT_ROOT`, `parse_env_file()`, `resolve_env_path()`, `load_project_env()`, `EnvFileError`. The single `.env` parser |
 | `outlook_mcp/config.py` | `ServerConfig` + `load_config()`: TOML file lookup and validation for transport / bind_host / bind_port |
 | `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_env()`, `credentials_from_headers()`, `GraphClientPool`, `get_graph()` |
-| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, accepts a shared token cache), `GraphClient` (async HTTP), `load_token_cache()`, `CredentialsError` |
+| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, accepts a shared token cache), `GraphClient` (async HTTP), `load_token_cache()`, `CredentialsError`, and the shared constants `GRAPH_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `authority_for()` |
+| `outlook_mcp/authorize.py` | The OAuth2 authorization code flow: browser, headless and `--code` modes. The only place that flow lives |
 | `outlook_mcp/folders.py` | `WELL_KNOWN_FOLDERS`, `find_folder_id_by_name()`, `resolve_folder()`, `format_folder_tree()` |
 | `outlook_mcp/attachments.py` | `read_attachment_meta()`, `attach_small_file()` (<=3MB inline), `attach_large_file()` (upload session), `attach_files()` |
 | `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `attachment_download_dir()` |

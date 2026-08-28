@@ -19,6 +19,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 outlook-mcp = "outlook_mcp.server:main"
+outlook-mcp-auth = "outlook_mcp.authorize:main"
 
 [tool.pytest.ini_options]
 # tests/unit only: tests/integration holds scripts that talk to the real Graph

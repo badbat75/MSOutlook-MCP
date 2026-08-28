@@ -95,6 +95,7 @@ project root, whatever the working directory is. Two rules worth knowing:
 python outlook_mcp_auth.py                # opens a browser
 python outlook_mcp_auth.py --no-browser   # headless/SSH: prints the URL
 python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
+outlook-mcp-auth                          # the installed console script
 ```
 
 Sign in, accept the permissions, and the tokens are written to

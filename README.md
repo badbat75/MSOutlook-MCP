@@ -82,6 +82,7 @@ OutlookMCP/
 │   ├── env.py                  # .env loader shared by every entry point
 │   ├── credentials.py          # Env/header credential readers + GraphClientPool
 │   ├── auth.py                 # AuthManager (MSAL) + GraphClient (httpx)
+│   ├── authorize.py            # OAuth2 authorization code flow
 │   ├── folders.py              # Mail folder resolution and rendering
 │   ├── attachments.py          # Inline and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
@@ -99,7 +100,7 @@ OutlookMCP/
 │   └── SETUP_PERSONAL_ACCOUNTS.md
 ├── contrib/                    # Deployment helpers, not part of the server
 ├── outlook_mcp_server.py       # Entry point wrapper (same as the outlook-mcp command)
-├── outlook_mcp_auth.py         # OAuth2 initial authorization
+├── outlook_mcp_auth.py         # Wrapper (same as the outlook-mcp-auth command)
 ├── outlook_mcp.toml.example    # Server configuration template
 ├── .env.example                # Credentials template
 └── pyproject.toml              # Package metadata, dependencies, pytest config
