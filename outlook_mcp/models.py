@@ -14,8 +14,8 @@ class ListMailInput(BaseModel):
         description=(
             "Mail folder: 'inbox', 'sentitems', 'drafts', 'deleteditems', 'junkemail', "
             "a subfolder display name (e.g. 'Centri Estivi'), or a folder ID. "
-            "Use '*' (or 'all') to search/list across the entire mailbox, ignoring folders "
-            "— useful with `search` when you don't know which folder a message is in."
+            "Use '*' (or 'all') to search/list across the entire mailbox, ignoring folders; "
+            "useful with `search` when you don't know which folder a message is in."
         )
     )
     top: int = Field(default=10, description="Number of messages to return", ge=1, le=50)

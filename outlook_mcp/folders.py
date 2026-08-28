@@ -89,7 +89,7 @@ async def format_folder_tree(
         unread = f.get("unreadItemCount", 0)
         unread_badge = f" (📬 {unread} unread)" if unread > 0 else ""
         lines += (
-            f"{indent}- **{f['displayName']}**{unread_badge} — "
+            f"{indent}- **{f['displayName']}**{unread_badge}: "
             f"{f.get('totalItemCount', 0)} items | ID: `{f['id']}`\n"
         )
         if recurse and f.get("childFolderCount", 0) > 0:

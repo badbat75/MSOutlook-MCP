@@ -145,7 +145,7 @@ async def outlook_get_event(params: GetEventInput, ctx: Context = None) -> str:
             for a in attendees:
                 email = a["emailAddress"]
                 status = a.get("status", {}).get("response", "none")
-                result += f"- {email['name']} <{email['address']}> — {status}\n"
+                result += f"- {email['name']} <{email['address']}>: {status}\n"
 
         body = data.get("body", {})
         if body.get("content"):

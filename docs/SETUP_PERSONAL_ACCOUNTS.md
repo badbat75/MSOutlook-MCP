@@ -87,80 +87,27 @@ After registration, you'll see the Overview page:
 
 ### 5. Configure Environment Variables
 
-Edit your `.env` file:
+Fill in your `.env` as described in [SETUP.md, step 3](SETUP.md#3-configure-the-credentials):
 
 ```ini
-# Copy these from Azure Portal
 OUTLOOK_CLIENT_ID=your-application-client-id-from-step-2
 OUTLOOK_CLIENT_SECRET=your-client-secret-value-from-step-3
 OUTLOOK_TENANT_ID=common
 ```
 
-**Critical:** For personal accounts, always use `OUTLOOK_TENANT_ID=common`
+**Critical:** For personal accounts, always use `OUTLOOK_TENANT_ID=common`.
+Any other value produces `AADSTS50020`, explained in the troubleshooting
+section below.
 
-### 6. Load Environment and Authorize
+### 6. Authorize
 
-**Windows:**
-```powershell
-# Load environment variables and activate venv
-. .\scripts\setup-env.ps1
-
-# You should see:
-# ================================================================
-# Outlook MCP - Environment Setup
-# ================================================================
-#
-# Loading configuration from .env...
-# Activating virtual environment...
-# Virtual environment activated (venv)
-#
-# Environment configured:
-#   OUTLOOK_CLIENT_ID     = 12345678...
-#   OUTLOOK_CLIENT_SECRET = *** (hidden)
-#   OUTLOOK_TENANT_ID     = common
-
-# Run authorization (choose one mode)
-
-# Normal mode - Opens browser automatically
-python outlook_mcp_auth.py
-
-# Headless mode - For remote/SSH systems
-python outlook_mcp_auth.py --no-browser
-
-# Direct mode - Provide auth code directly
-python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
-```
-
-**macOS/Linux:**
 ```bash
-# Load environment variables and activate venv
-source ./scripts/setup-env.sh
-
-# You should see:
-# ================================================================
-# Outlook MCP - Environment Setup
-# ================================================================
-#
-# Loading configuration from .env...
-# Activating virtual environment...
-# Virtual environment activated (venv)
-#
-# Environment configured:
-#   OUTLOOK_CLIENT_ID     = 12345678...
-#   OUTLOOK_CLIENT_SECRET = *** (hidden)
-#   OUTLOOK_TENANT_ID     = common
-
-# Run authorization (choose one mode)
-
-# Normal mode - Opens browser automatically
-python outlook_mcp_auth.py
-
-# Headless mode - For remote/SSH systems
-python outlook_mcp_auth.py --no-browser
-
-# Direct mode - Provide auth code directly
+python outlook_mcp_auth.py                # normal: opens a browser
+python outlook_mcp_auth.py --no-browser   # headless / SSH
 python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 ```
+
+The script reads the `.env` itself, so nothing needs loading first.
 
 ### 7. Sign In with Your Personal Account
 
@@ -394,11 +341,11 @@ python outlook_mcp_auth.py
 
 Once setup is complete:
 
-1. **Configure Claude Desktop** - See [QUICKSTART.md](QUICKSTART.md#5-configure-claude-desktop)
+1. **Configure Claude Desktop** - See [SETUP.md](SETUP.md#7-connect-a-client)
 2. **Test with Claude** - Try commands like "Show me my unread emails"
-3. **Daily Usage** - Just run the setup script to load environment:
-   - **Windows:** `. .\scripts\setup-env.ps1`
-   - **macOS/Linux:** `source ./scripts/setup-env.sh`
+3. **Daily Usage** - Nothing to load: the server reads the `.env` itself. The
+   `scripts/setup-env` helpers are only for putting the same variables, and the
+   activated venv, into your own shell.
 
 ## Reference
 

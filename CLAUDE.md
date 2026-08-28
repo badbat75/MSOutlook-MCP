@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 17 MCP tools.
+Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 19 MCP tools.
 
 **Core Architecture:**
 - **`MCPServer` from the official `mcp` SDK 2.x** (`mcp.server.mcpserver`; the 1.x `FastMCP` import no longer exists) for tool registration and server lifecycle
@@ -19,30 +19,51 @@ Outlook MCP Server - A Model Context Protocol server that connects Claude to Mic
 OutlookMCP/
 ├── outlook_mcp/                # Core package
 │   ├── __init__.py
-│   ├── auth.py                 # AuthManager + GraphClient + shared MSAL token cache
+│   ├── app.py                  # The MCPServer instance + lifespan (GraphClientPool)
+│   ├── server.py               # Entry point: argparse, .env, config, mcp.run()
 │   ├── config.py               # outlook_mcp.toml loader: transport, bind_host, bind_port
+│   ├── env.py                  # .env loader + PROJECT_ROOT, shared by every entry point
+│   ├── credentials.py          # Credentials, env/header readers, GraphClientPool, get_graph()
+│   ├── auth.py                 # AuthManager + GraphClient + shared MSAL token cache
+│   ├── folders.py              # Well-known aliases, name lookup, folder tree rendering
+│   ├── attachments.py          # Inline (<=3MB) and upload-session attachment writing
+│   ├── helpers.py              # Formatting, error handling, $filter validation
 │   ├── models.py               # Pydantic input models
-│   ├── helpers.py              # Formatting and error handling utilities
-│   └── server.py               # MCP tool definitions + lifecycle + credential resolution + entry point
+│   └── tools/                  # The 19 @mcp.tool() definitions
+│       ├── __init__.py         # Imports the three modules = registers every tool
+│       ├── mail.py             # 11 email tools
+│       ├── calendar.py         # 7 calendar tools
+│       └── profile.py          # 1 profile tool
 ├── scripts/
-│   ├── setup-env.ps1           # Load .env + activate venv (Windows)
-│   ├── setup-env.sh            # Load .env + activate venv (macOS/Linux)
+│   ├── setup-env.ps1           # Load .env + activate venv into YOUR shell (Windows)
+│   ├── setup-env.sh            # Load .env + activate venv into YOUR shell (macOS/Linux)
 │   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
 │   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
-│   ├── test_mcp_server.py      # Integration tests via JSON-RPC over stdio
-│   └── test_http_server.py     # Integration tests over streamable HTTP, credentials as headers
+│   ├── unit/                   # pytest, no network: env, config, credentials
+│   └── integration/            # Hand-run scripts that call the real Graph API
+│       ├── test_mcp_server.py  # JSON-RPC over stdio
+│       └── test_http_server.py # Streamable HTTP, credentials as headers
 ├── docs/
-│   ├── QUICKSTART.md           # Quick start guide
-│   └── SETUP_PERSONAL_ACCOUNTS.md  # Personal account setup guide
-├── outlook_mcp_server.py       # Entry point (thin wrapper → outlook_mcp.server:main)
+│   ├── SETUP.md                # The single setup guide (was QUICKSTART.md)
+│   └── SETUP_PERSONAL_ACCOUNTS.md  # Personal account specifics + AADSTS error table
+├── contrib/                    # Deployment helpers, not part of the server
+│   ├── mcp_call.py             # Minimal stdio client for calling one tool by hand
+│   └── openclaw.json           # MCP host config for the openclaw Linux deployment
+├── outlook_mcp_server.py       # Entry point wrapper (identical to the outlook-mcp command)
 ├── outlook_mcp_auth.py         # OAuth2 initial authorization (standalone)
 ├── outlook_mcp.toml.example    # Server configuration template (copy to outlook_mcp.toml, gitignored)
-├── pyproject.toml              # Package metadata and dependencies
-├── requirements.txt            # Pip dependencies
-├── .env.example                # Environment variable template
+├── pyproject.toml              # Package metadata, dependencies, pytest config
+├── requirements.txt            # `-e .` only; versions live in pyproject.toml
+├── .env.example                # Credentials template
 └── claude_desktop_config_example.json
 ```
+
+**Where things go.** A new tool goes in `tools/`, never in `server.py`:
+server.py is the entry point and nothing else. Anything a tool needs that is
+not formatting belongs in its own module (`folders.py`, `attachments.py`),
+because the one-file version of this package reached 1441 lines and hid its
+seams.
 
 ## Authentication Flow
 
@@ -111,7 +132,17 @@ OUTLOOK_TENANT_ID      # Azure AD tenant ID or "common"
 ```bash
 OUTLOOK_DOWNLOAD_PATH  # Custom path for email attachments (default: ~/Downloads/outlook_attachments)
 OUTLOOK_MCP_CONFIG     # Path to the TOML server configuration (default: <project root>/outlook_mcp.toml)
+OUTLOOK_ENV_FILE       # Path to the .env to read (default: <project root>/.env)
 ```
+
+**The server reads the `.env` itself** through `outlook_mcp/env.py`, from the
+project root, whatever the CWD is. That module is the only `.env` parser in the
+codebase: the server, `outlook_mcp_auth.py`, the integration scripts and
+`contrib/mcp_call.py` all call `load_project_env()`. Do not add a second one.
+Variables already present in the environment always win over the file, so a
+Claude Desktop `env` block or a systemd `Environment=` line still overrides it.
+`--env-file` / `$OUTLOOK_ENV_FILE` move the location; an explicit path that
+does not exist is a hard error (exit code 2), mirroring `--config`.
 
 **In HTTP mode the three credential variables are ignored.** Every request must
 carry `X-Outlook-Client-Id`, `X-Outlook-Client-Secret` and (optionally,
@@ -137,56 +168,25 @@ bind_port = 8000          # HTTP only
 The HTTP endpoint is `http://<bind_host>:<bind_port>/mcp` (streamable HTTP).
 Template: `outlook_mcp.toml.example`. The real file is gitignored.
 
-**Setting Environment Variables (recommended approach):**
+**Setting the credentials:**
 
-Use the provided setup script with a `.env` configuration file:
-
-**Windows (PowerShell):**
-```powershell
-# 1. Copy the example to create your config file
-Copy-Item .env.example .env
-
-# 2. Edit .env and fill in your Azure AD credentials
-
-# 3. Run setup script with dot-sourcing to load variables
-. .\scripts\setup-env.ps1
-```
-
-**macOS/Linux (Bash):**
 ```bash
-# 1. Copy the example to create your config file
-cp .env.example .env
-
-# 2. Edit .env and fill in your Azure AD credentials
-
-# 3. Run setup script with source to load variables
-source ./scripts/setup-env.sh
+cp .env.example .env    # then fill in the three OUTLOOK_* values
 ```
 
-The setup script will:
-- Load environment variables from `.env` file
-- Activate the virtual environment automatically
-- Validate that all required variables are set
-- Display a masked summary of your configuration
-
-**Alternative: Manual environment variable setup:**
+That is the whole procedure: the server, the auth script and the tests all read
+that file. The `scripts/setup-env.*` helpers are for a different job, getting
+the same variables plus the activated venv into an **interactive shell**:
 
 ```powershell
-# Windows PowerShell
-$env:OUTLOOK_CLIENT_ID = "your-client-id"
-$env:OUTLOOK_CLIENT_SECRET = "your-client-secret"
-$env:OUTLOOK_TENANT_ID = "your-tenant-id"
-
-# Windows CMD
-set OUTLOOK_CLIENT_ID=your-client-id
-set OUTLOOK_CLIENT_SECRET=your-client-secret
-set OUTLOOK_TENANT_ID=your-tenant-id
-
-# macOS/Linux bash
-export OUTLOOK_CLIENT_ID="your-client-id"
-export OUTLOOK_CLIENT_SECRET="your-client-secret"
-export OUTLOOK_TENANT_ID="your-tenant-id"
+. .\scripts\setup-env.ps1       # Windows, dot-sourced
 ```
+```bash
+source ./scripts/setup-env.sh   # macOS/Linux
+```
+
+They keep their own shell parser for that reason; nothing that runs the server
+depends on them.
 
 ### Azure AD App Requirements
 The app registration must have these **delegated permissions**:
@@ -213,7 +213,14 @@ python outlook_mcp_server.py
 
 # Run with an explicit configuration file (e.g. transport = "http")
 python outlook_mcp_server.py --config /etc/outlook_mcp/outlook_mcp.toml
+
+# Same program, installed console script
+outlook-mcp
 ```
+
+`outlook_mcp_server.py` and `outlook-mcp` both call `outlook_mcp.server.main()`
+and behave identically, including the `.env` load. Keep it that way: putting
+setup in the wrapper is what made the two diverge before.
 
 ### Claude Desktop Integration
 Add to `claude_desktop_config.json` (use the venv Python interpreter):
@@ -224,12 +231,7 @@ Add to `claude_desktop_config.json` (use the venv Python interpreter):
   "mcpServers": {
     "outlook": {
       "command": "C:\\path\\to\\OutlookMCP\\venv\\Scripts\\python.exe",
-      "args": ["C:\\path\\to\\OutlookMCP\\outlook_mcp_server.py"],
-      "env": {
-        "OUTLOOK_CLIENT_ID": "...",
-        "OUTLOOK_CLIENT_SECRET": "...",
-        "OUTLOOK_TENANT_ID": "..."
-      }
+      "args": ["C:\\path\\to\\OutlookMCP\\outlook_mcp_server.py"]
     }
   }
 }
@@ -241,16 +243,15 @@ Add to `claude_desktop_config.json` (use the venv Python interpreter):
   "mcpServers": {
     "outlook": {
       "command": "/path/to/OutlookMCP/venv/bin/python",
-      "args": ["/path/to/OutlookMCP/outlook_mcp_server.py"],
-      "env": {
-        "OUTLOOK_CLIENT_ID": "...",
-        "OUTLOOK_CLIENT_SECRET": "...",
-        "OUTLOOK_TENANT_ID": "..."
-      }
+      "args": ["/path/to/OutlookMCP/outlook_mcp_server.py"]
     }
   }
 }
 ```
+
+No `env` block is needed: the server reads the project `.env`. Add one only to
+override it (a different app registration for this host, for instance), since
+environment variables take precedence over the file.
 
 Or use the config generator:
 
@@ -285,16 +286,22 @@ claude mcp add --transport http outlook http://server:8000/mcp \
 
 | Module | Purpose |
 |--------|---------|
-| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, accepts a shared token cache), `GraphClient` (async HTTP), `load_token_cache()`, `CredentialsError` |
+| `outlook_mcp/app.py` | The `mcp = MCPServer(...)` instance, `app_lifespan` (builds the `GraphClientPool`), `get_config()` / `set_config()`. Tool modules import `mcp` from here, which is what keeps server.py free to import the tools |
+| `outlook_mcp/server.py` | Entry point only: `_parse_args()`, `main()`, and the `from . import tools` whose side effect registers them |
+| `outlook_mcp/env.py` | `PROJECT_ROOT`, `parse_env_file()`, `resolve_env_path()`, `load_project_env()`, `EnvFileError`. The single `.env` parser |
 | `outlook_mcp/config.py` | `ServerConfig` + `load_config()`: TOML file lookup and validation for transport / bind_host / bind_port |
+| `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_env()`, `credentials_from_headers()`, `GraphClientPool`, `get_graph()` |
+| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, accepts a shared token cache), `GraphClient` (async HTTP), `load_token_cache()`, `CredentialsError` |
+| `outlook_mcp/folders.py` | `WELL_KNOWN_FOLDERS`, `find_folder_id_by_name()`, `resolve_folder()`, `format_folder_tree()` |
+| `outlook_mcp/attachments.py` | `read_attachment_meta()`, `attach_small_file()` (<=3MB inline), `attach_large_file()` (upload session), `attach_files()` |
+| `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `attachment_download_dir()` |
 | `outlook_mcp/models.py` | All Pydantic v2 input models with validation |
-| `outlook_mcp/helpers.py` | `format_email_summary()`, `format_event_summary()`, `handle_graph_error()`, `make_recipients()` |
-| `outlook_mcp/server.py` | `MCPServer` setup, lifespan (`GraphClientPool`), credential resolution (`credentials_from_env()` / `credentials_from_headers()` / `_get_graph()`), all `@mcp.tool()` definitions, `main()` entry point |
+| `outlook_mcp/tools/` | The `@mcp.tool()` definitions, split mail / calendar / profile |
 
-### Credential Resolution (`_get_graph`)
+### Credential Resolution (`get_graph`)
 
-`_get_graph(ctx)` decides the credential source from the transport, not from a
-flag: over HTTP the SDK attaches the Starlette `Request` to
+`get_graph(ctx)` in `credentials.py` decides the credential source from the
+transport, not from a flag: over HTTP the SDK attaches the Starlette `Request` to
 `ctx.request_context.request`, and the `X-Outlook-*` headers of that request
 are authoritative; over stdio the request is `None` and the `OUTLOOK_*`
 variables read at startup are used. The lifespan holds a `GraphClientPool`
@@ -368,57 +375,42 @@ Graph API supports aliases like `inbox`, `sentitems`, `deleteditems`, `archive`,
 
 ### Testing Changes
 
-**Windows:**
-```powershell
-# 0. Load environment
-. .\scripts\setup-env.ps1
-
-# 1. Make code changes to files in outlook_mcp/ or outlook_mcp_auth.py
-
-# 2. If auth logic changed, re-run auth setup
-python outlook_mcp_auth.py
-
-# 3. Run integration tests
-python tests\test_mcp_server.py
-python tests\test_mcp_server.py --verbose  # Full response output
-python tests\test_mcp_server.py --quick    # Handshake + profile only
-
-# 4. Test via Claude Desktop (restart Claude Desktop to reload server)
-
-# 5. HTTP transport test (temporary config on a free port, creds sent as headers,
-#    server env stripped of OUTLOOK_*):
-python tests\test_http_server.py
-```
-
-**macOS/Linux:**
 ```bash
-# 0. Load environment
-source ./scripts/setup-env.sh
-
-# 1. Make code changes to files in outlook_mcp/ or outlook_mcp_auth.py
+# 1. Unit tests: no network, no credentials, always runnable. Run these first.
+pytest
 
 # 2. If auth logic changed, re-run auth setup
 python outlook_mcp_auth.py
 
-# 3. Run integration tests
-python tests/test_mcp_server.py
-python tests/test_mcp_server.py --verbose  # Full response output
-python tests/test_mcp_server.py --quick    # Handshake + profile only
+# 3. Integration, stdio (real Graph calls; needs a valid token cache)
+python tests/integration/test_mcp_server.py
+python tests/integration/test_mcp_server.py --verbose  # Full response output
+python tests/integration/test_mcp_server.py --quick    # Handshake + profile only
 
-# 4. Test via Claude Desktop (restart Claude Desktop to reload server)
+# 4. Integration, HTTP transport (temporary config on a free port, creds sent as
+#    headers, server denied both OUTLOOK_* and the project .env)
+python tests/integration/test_http_server.py
 
-# 5. HTTP transport test (temporary config on a free port, creds sent as headers,
-#    server env stripped of OUTLOOK_*):
-python tests/test_http_server.py
+# 5. Test via Claude Desktop (restart Claude Desktop to reload the server)
 ```
+
+`pytest` collects `tests/unit` only (see `[tool.pytest.ini_options]`), so a bare
+`pytest` never tries to reach Azure. Pure logic belongs there: anything that can
+be tested without the network should be, because the integration scripts stop
+being runnable the moment an app registration expires.
+
+A quick check that costs nothing and catches most refactoring mistakes: start
+the server over stdio and call `tools/list`. It exercises every import and every
+decorator without touching Graph.
 
 ### Adding New Tools
 
-1. Define Pydantic input model in `outlook_mcp/models.py` (inherit from `BaseModel`)
-2. Add `@mcp.tool()` decorated async function in `outlook_mcp/server.py`
-3. Use `_get_graph(ctx)` to access GraphClient
-4. Call Graph API endpoint via `graph.get()`, `graph.post()`, etc.
-5. Format response using helpers from `outlook_mcp/helpers.py`
+1. Define the Pydantic input model in `outlook_mcp/models.py` (inherit from `BaseModel`)
+2. Add the `@mcp.tool()` decorated async function to the right module in
+   `outlook_mcp/tools/` (mail, calendar or profile). Never to `server.py`
+3. Use `get_graph(ctx)` from `..credentials` to access the GraphClient
+4. Call the Graph endpoint via `graph.get()`, `graph.post()`, etc.
+5. Format the response with helpers from `..helpers`
 6. Wrap in try/except and use `handle_graph_error(e)` for Graph errors
 
 Example skeleton:
@@ -427,18 +419,24 @@ Example skeleton:
 class MyNewToolInput(BaseModel):
     param: str = Field(description="Parameter description")
 
-# In outlook_mcp/server.py:
-from .models import MyNewToolInput
+# In outlook_mcp/tools/mail.py:
+from ..app import mcp
+from ..credentials import get_graph
+from ..helpers import handle_graph_error
+from ..models import MyNewToolInput
 
 @mcp.tool(name="outlook_my_new_tool", description="Tool description")
 async def my_new_tool(params: MyNewToolInput, ctx: Context = None) -> str:
-    graph = _get_graph(ctx)
+    graph = get_graph(ctx)
     try:
         result = await graph.get(f"/me/endpoint", params={"key": params.param})
         return json.dumps(result, indent=2)
     except Exception as e:
         return handle_graph_error(e)
 ```
+
+A tool in a new module needs one line in `outlook_mcp/tools/__init__.py`, or it
+is never registered.
 
 ### Debugging
 
@@ -447,7 +445,7 @@ async def my_new_tool(params: MyNewToolInput, ctx: Context = None) -> str:
 - "No valid token available" with a fresh cache and `AADSTS700016` from MSAL means the app registration behind the client id no longer exists in the directory: that is an Azure-side problem, not a code regression
 - Graph API errors: check response body in exception (includes error code and message)
 - Rate limiting: Graph returns 429 with Retry-After header (not auto-handled currently)
-- The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it, which may not even be traversable by the server's user (e.g. a daemon started from another user's 0700 home). With mcp SDK 1.x this used to crash at startup because FastMCP's pydantic-settings probed `./.env`; SDK 2.x reads no `.env` / `MCP_*` at all, and every path this project resolves itself (`outlook_mcp.toml`, the `.env` loaded by the entry-point wrapper) is anchored to the project directory via `__file__`, never to the CWD. Keep it that way
+- The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it, which may not even be traversable by the server's user (e.g. a daemon started from another user's 0700 home). With mcp SDK 1.x this used to crash at startup because FastMCP's pydantic-settings probed `./.env`; SDK 2.x reads no `.env` / `MCP_*` at all, and every path this project resolves itself (`outlook_mcp.toml` via `config.DEFAULT_CONFIG_PATH`, the `.env` via `env.DEFAULT_ENV_PATH`) hangs off `env.PROJECT_ROOT`, which is `__file__`-derived. Keep it that way: no relative path, no `Path.cwd()`
 
 ## Microsoft Graph API Quirks
 

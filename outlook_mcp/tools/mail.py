@@ -94,7 +94,7 @@ async def outlook_list_mail(params: ListMailInput, ctx: Context = None) -> str:
             return f"No messages found in '{params.folder}'"
 
         total = data.get("@odata.count", "unknown")
-        header = f"📬 **{folder_label}** — {len(messages)} messages"
+        header = f"📬 **{folder_label}**: {len(messages)} messages"
         if not params.search:
             header += f" (skip: {params.skip})"
         result = header + "\n\n"
