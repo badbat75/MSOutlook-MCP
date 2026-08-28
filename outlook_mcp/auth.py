@@ -22,6 +22,24 @@ TOKEN_CACHE_PATH = Path.home() / ".outlook_mcp_token_cache.json"
 logger = logging.getLogger("outlook_mcp")
 
 
+class CredentialsError(RuntimeError):
+    """Raised when a request cannot be served because no Azure AD credentials are available."""
+
+
+def load_token_cache(path: Path = TOKEN_CACHE_PATH) -> msal.SerializableTokenCache:
+    """Load the MSAL token cache written by outlook_mcp_auth.py (empty if absent).
+
+    One cache instance can back several ``AuthManager`` objects: MSAL keys every
+    entry by client id, so tokens for different app registrations coexist and a
+    single serialize() call persists all of them. Give each AuthManager its own
+    cache object only if they must never see each other's tokens.
+    """
+    cache = msal.SerializableTokenCache()
+    if path.exists():
+        cache.deserialize(path.read_text())
+    return cache
+
+
 # =============================================================================
 # Authentication Manager
 # =============================================================================
@@ -29,19 +47,21 @@ logger = logging.getLogger("outlook_mcp")
 class AuthManager:
     """Handles MSAL authentication with token caching and refresh."""
 
-    def __init__(self, client_id: str, client_secret: str, tenant_id: str):
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        tenant_id: str,
+        token_cache: Optional[msal.SerializableTokenCache] = None,
+    ):
         self.client_id = client_id
         self.client_secret = client_secret
         self.tenant_id = tenant_id
         self.authority = f"https://login.microsoftonline.com/{tenant_id}"
-        self._cache = msal.SerializableTokenCache()
+        # A caller may hand in a cache shared with other managers (HTTP mode,
+        # one manager per set of header credentials); otherwise load our own.
+        self._cache = token_cache if token_cache is not None else load_token_cache()
         self._app: Optional[msal.ConfidentialClientApplication] = None
-        self._load_cache()
-
-    def _load_cache(self):
-        """Load token cache from disk."""
-        if TOKEN_CACHE_PATH.exists():
-            self._cache.deserialize(TOKEN_CACHE_PATH.read_text())
 
     def _save_cache(self):
         """Persist token cache to disk."""

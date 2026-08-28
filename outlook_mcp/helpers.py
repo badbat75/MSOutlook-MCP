@@ -8,6 +8,8 @@ from typing import List
 
 import httpx
 
+from .auth import CredentialsError
+
 
 # Reusable guidance for building a valid OData $filter (shared by the pre-flight
 # validation in server.py and the 400-error handler below).
@@ -124,6 +126,9 @@ def handle_graph_error(e: Exception) -> str:
             return f"Error {status}: {error_msg}"
     elif isinstance(e, httpx.TimeoutException):
         return "Error: Request timed out. The Graph API may be slow. Please retry."
+    elif isinstance(e, CredentialsError):
+        # The message already says which headers / variables are missing.
+        return f"Error: {e}"
     return f"Error: {type(e).__name__}: {str(e)}"
 
 

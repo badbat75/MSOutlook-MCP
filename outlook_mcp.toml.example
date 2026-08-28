@@ -1,0 +1,28 @@
+# Outlook MCP - Server configuration
+# ===================================
+# Copy this file to outlook_mcp.toml (next to outlook_mcp_server.py) and edit.
+# outlook_mcp.toml is gitignored: each deployment keeps its own copy.
+#
+# The file is looked up in this order:
+#   1. --config PATH                     (command line)
+#   2. $OUTLOOK_MCP_CONFIG               (environment variable)
+#   3. <project root>/outlook_mcp.toml   (this location)
+# With no file at all the server runs on stdio.
+#
+# Credentials do NOT go here:
+#   - stdio: OUTLOOK_CLIENT_ID / OUTLOOK_CLIENT_SECRET / OUTLOOK_TENANT_ID
+#            environment variables (see .env.example)
+#   - http:  X-Outlook-Client-Id / X-Outlook-Client-Secret / X-Outlook-Tenant-Id
+#            request headers sent by the MCP client on every call
+
+[server]
+# "stdio" (Claude Desktop, Claude Code, daemons that spawn the process)
+# or "http" (streamable HTTP endpoint at http://<bind_host>:<bind_port>/mcp)
+transport = "stdio"
+
+# HTTP only. Use "127.0.0.1" for local clients, "0.0.0.0" to accept
+# connections from other machines (put it behind TLS / a reverse proxy).
+bind_host = "127.0.0.1"
+
+# HTTP only.
+bind_port = 8000

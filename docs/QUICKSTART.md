@@ -113,12 +113,24 @@ python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 ### 4. Start the Server
 
 ```powershell
-# For Claude Desktop (stdio mode)
+# Transport is read from outlook_mcp.toml (stdio when the file is absent)
 python outlook_mcp_server.py
-
-# For remote access (HTTP mode)
-python outlook_mcp_server.py --http --port 8000
 ```
+
+For remote access over HTTP, copy `outlook_mcp.toml.example` to
+`outlook_mcp.toml` and set:
+
+```toml
+[server]
+transport = "http"
+bind_host = "0.0.0.0"
+bind_port = 8000
+```
+
+In HTTP mode the credentials are **not** read from the environment: every
+request must carry the `X-Outlook-Client-Id`, `X-Outlook-Client-Secret` and
+(optionally) `X-Outlook-Tenant-Id` headers. The endpoint is
+`http://<bind_host>:<bind_port>/mcp`.
 
 ### 5. Configure Claude Desktop
 

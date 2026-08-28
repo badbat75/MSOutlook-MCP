@@ -43,6 +43,7 @@ OutlookMCP/
 ├── outlook_mcp/                # Core package
 │   ├── __init__.py
 │   ├── auth.py                 # AuthManager + GraphClient
+│   ├── config.py               # outlook_mcp.toml loader (transport, bind host/port)
 │   ├── models.py               # Pydantic input models
 │   ├── helpers.py              # Formatting and error handling
 │   └── server.py               # MCP tool definitions + lifecycle
@@ -52,12 +53,14 @@ OutlookMCP/
 │   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
 │   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
-│   └── test_mcp_server.py      # Integration tests via JSON-RPC
+│   ├── test_mcp_server.py      # Integration tests via JSON-RPC over stdio
+│   └── test_http_server.py     # Integration tests over HTTP (credentials in headers)
 ├── docs/
 │   ├── QUICKSTART.md           # Quick start guide
 │   └── SETUP_PERSONAL_ACCOUNTS.md  # Personal account setup
 ├── outlook_mcp_server.py       # Entry point (thin wrapper)
 ├── outlook_mcp_auth.py         # OAuth2 initial authorization
+├── outlook_mcp.toml.example    # Server configuration template (transport, bind address)
 ├── requirements.txt
 ├── pyproject.toml
 ├── .env.example
@@ -175,15 +178,51 @@ python outlook_mcp_auth.py --code 'http://localhost:5000/callback?code=...'
 
 After authorization, tokens are saved to `~/.outlook_mcp_token_cache.json`.
 
-### 5. Start the Server
+### 5. Configure the Transport (optional)
+
+The transport and the HTTP listening address are read from `outlook_mcp.toml`
+next to `outlook_mcp_server.py` (or from the file named by `--config PATH` /
+`$OUTLOOK_MCP_CONFIG`). Without the file the server runs on **stdio**.
 
 ```bash
-# For Claude Desktop (stdio)
-python outlook_mcp_server.py
-
-# For remote access (HTTP)
-python outlook_mcp_server.py --http --port 8000
+cp outlook_mcp.toml.example outlook_mcp.toml
 ```
+
+```toml
+[server]
+transport = "http"        # "stdio" (default) or "http"
+bind_host = "0.0.0.0"     # HTTP only: 127.0.0.1 for local clients, 0.0.0.0 for remote
+bind_port = 8000          # HTTP only
+```
+
+The file is gitignored; each deployment keeps its own copy. It never holds
+credentials.
+
+### 6. Start the Server
+
+```bash
+python outlook_mcp_server.py                       # transport from outlook_mcp.toml
+python outlook_mcp_server.py --config /etc/outlook_mcp.toml
+```
+
+**Where credentials come from depends on the transport:**
+
+| Transport | Credentials | Endpoint |
+|-----------|-------------|----------|
+| `stdio` | `OUTLOOK_CLIENT_ID`, `OUTLOOK_CLIENT_SECRET`, `OUTLOOK_TENANT_ID` environment variables | process stdin/stdout |
+| `http` | `X-Outlook-Client-Id`, `X-Outlook-Client-Secret`, `X-Outlook-Tenant-Id` request headers, sent by the MCP client on every call (environment variables are ignored) | `http://<bind_host>:<bind_port>/mcp` (streamable HTTP) |
+
+In HTTP mode `X-Outlook-Tenant-Id` is optional (defaults to `common`). A call
+without the two required headers fails with an error naming them. Different
+clients may send different app registrations: the server keeps one Graph
+client per credential set, all backed by the shared token cache written by
+`outlook_mcp_auth.py`, so run the auth script once for every client id you
+intend to use. `OUTLOOK_DOWNLOAD_PATH` stays a server-side environment
+variable in both modes (a remote caller must not choose where the server
+writes files).
+
+Expose an HTTP server only over TLS or behind a reverse proxy: the client
+secret travels in a header.
 
 ---
 
@@ -229,6 +268,7 @@ Or use the config generator:
 
 ## Claude Code Configuration
 
+**stdio (local process, credentials from the environment):**
 ```bash
 # Windows
 claude mcp add outlook -- C:\path\to\OutlookMCP\venv\Scripts\python.exe outlook_mcp_server.py
@@ -236,6 +276,17 @@ claude mcp add outlook -- C:\path\to\OutlookMCP\venv\Scripts\python.exe outlook_
 # macOS/Linux
 claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server.py
 ```
+
+**HTTP (remote server, credentials in headers):**
+```bash
+claude mcp add --transport http outlook http://server.example.com:8000/mcp \
+  --header "X-Outlook-Client-Id: your-client-id" \
+  --header "X-Outlook-Client-Secret: your-client-secret" \
+  --header "X-Outlook-Tenant-Id: your-tenant-id"
+```
+
+Any MCP client that supports streamable HTTP with custom headers works the
+same way; the three headers must accompany every request, not only the first.
 
 ---
 
@@ -259,18 +310,25 @@ Once configured, you can ask Claude:
 **Windows:**
 ```powershell
 . .\scripts\setup-env.ps1
-python tests\test_mcp_server.py           # Full test suite
+python tests\test_mcp_server.py           # Full test suite (stdio)
 python tests\test_mcp_server.py --quick   # Handshake + profile only
 python tests\test_mcp_server.py --verbose # Show full responses
+python tests\test_http_server.py          # HTTP transport, credentials sent as headers
 ```
 
 **macOS/Linux:**
 ```bash
 source ./scripts/setup-env.sh
-python tests/test_mcp_server.py           # Full test suite
+python tests/test_mcp_server.py           # Full test suite (stdio)
 python tests/test_mcp_server.py --quick   # Handshake + profile only
 python tests/test_mcp_server.py --verbose # Show full responses
+python tests/test_http_server.py          # HTTP transport, credentials sent as headers
 ```
+
+`test_http_server.py` starts the server on a free port with a temporary
+`outlook_mcp.toml`, strips every `OUTLOOK_*` variable from the server's
+environment and forwards your credentials as `X-Outlook-*` headers, so it
+fails if anything but the headers is consulted.
 
 ---
 

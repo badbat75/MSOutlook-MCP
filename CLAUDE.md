@@ -7,10 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 17 MCP tools.
 
 **Core Architecture:**
-- **FastMCP framework** for tool registration and server lifecycle
+- **`MCPServer` from the official `mcp` SDK 2.x** (`mcp.server.mcpserver`; the 1.x `FastMCP` import no longer exists) for tool registration and server lifecycle
 - **MSAL (Microsoft Authentication Library)** for OAuth2 with automatic token refresh
 - **Microsoft Graph API v1.0** for all Outlook operations
 - **Async/await** throughout using httpx for HTTP client
+- **Two transports, one entry point:** stdio (credentials from `OUTLOOK_*` env vars) or streamable HTTP (credentials from `X-Outlook-*` request headers), selected by the external `outlook_mcp.toml` file
 
 ## Project Structure
 
@@ -18,22 +19,25 @@ Outlook MCP Server - A Model Context Protocol server that connects Claude to Mic
 OutlookMCP/
 ├── outlook_mcp/                # Core package
 │   ├── __init__.py
-│   ├── auth.py                 # AuthManager + GraphClient
+│   ├── auth.py                 # AuthManager + GraphClient + shared MSAL token cache
+│   ├── config.py               # outlook_mcp.toml loader: transport, bind_host, bind_port
 │   ├── models.py               # Pydantic input models
 │   ├── helpers.py              # Formatting and error handling utilities
-│   └── server.py               # MCP tool definitions + lifecycle + entry point
+│   └── server.py               # MCP tool definitions + lifecycle + credential resolution + entry point
 ├── scripts/
 │   ├── setup-env.ps1           # Load .env + activate venv (Windows)
 │   ├── setup-env.sh            # Load .env + activate venv (macOS/Linux)
 │   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
 │   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
-│   └── test_mcp_server.py      # Integration tests via JSON-RPC over stdio
+│   ├── test_mcp_server.py      # Integration tests via JSON-RPC over stdio
+│   └── test_http_server.py     # Integration tests over streamable HTTP, credentials as headers
 ├── docs/
 │   ├── QUICKSTART.md           # Quick start guide
 │   └── SETUP_PERSONAL_ACCOUNTS.md  # Personal account setup guide
 ├── outlook_mcp_server.py       # Entry point (thin wrapper → outlook_mcp.server:main)
 ├── outlook_mcp_auth.py         # OAuth2 initial authorization (standalone)
+├── outlook_mcp.toml.example    # Server configuration template (copy to outlook_mcp.toml, gitignored)
 ├── pyproject.toml              # Package metadata and dependencies
 ├── requirements.txt            # Pip dependencies
 ├── .env.example                # Environment variable template
@@ -96,7 +100,7 @@ pip install -r requirements.txt
 
 ### Environment Variables
 
-**Required:**
+**Required in stdio mode (and by `outlook_mcp_auth.py`):**
 ```bash
 OUTLOOK_CLIENT_ID      # Azure AD App client ID
 OUTLOOK_CLIENT_SECRET  # Azure AD App client secret
@@ -106,7 +110,32 @@ OUTLOOK_TENANT_ID      # Azure AD tenant ID or "common"
 **Optional:**
 ```bash
 OUTLOOK_DOWNLOAD_PATH  # Custom path for email attachments (default: ~/Downloads/outlook_attachments)
+OUTLOOK_MCP_CONFIG     # Path to the TOML server configuration (default: <project root>/outlook_mcp.toml)
 ```
+
+**In HTTP mode the three credential variables are ignored.** Every request must
+carry `X-Outlook-Client-Id`, `X-Outlook-Client-Secret` and (optionally,
+default `common`) `X-Outlook-Tenant-Id`; a call without them returns an error
+naming the missing headers. `OUTLOOK_DOWNLOAD_PATH` stays server-side in both
+modes: a remote caller must never choose where the server writes files.
+
+### Server Configuration File (`outlook_mcp.toml`)
+
+Transport and HTTP bind address are never command-line flags; they live in a
+TOML file resolved in this order: `--config PATH`, `$OUTLOOK_MCP_CONFIG`,
+`<project root>/outlook_mcp.toml` (CWD-independent). No file means stdio.
+An explicit path that does not exist, invalid TOML, or invalid values are hard
+errors (exit code 2), never a silent fallback to stdio.
+
+```toml
+[server]
+transport = "http"        # "stdio" (default) or "http"
+bind_host = "0.0.0.0"     # HTTP only
+bind_port = 8000          # HTTP only
+```
+
+The HTTP endpoint is `http://<bind_host>:<bind_port>/mcp` (streamable HTTP).
+Template: `outlook_mcp.toml.example`. The real file is gitignored.
 
 **Setting Environment Variables (recommended approach):**
 
@@ -179,11 +208,11 @@ Redirect URI must be: `http://localhost:5000/callback`
 python outlook_mcp_auth.py                # Normal mode (opens browser)
 python outlook_mcp_auth.py --no-browser   # Headless mode (for remote systems)
 
-# Run in stdio mode (default, for Claude Desktop)
+# Run with the transport from outlook_mcp.toml (stdio when the file is absent)
 python outlook_mcp_server.py
 
-# Run in HTTP mode (for remote access)
-python outlook_mcp_server.py --http --port 8000
+# Run with an explicit configuration file (e.g. transport = "http")
+python outlook_mcp_server.py --config /etc/outlook_mcp/outlook_mcp.toml
 ```
 
 ### Claude Desktop Integration
@@ -237,11 +266,17 @@ Or use the config generator:
 
 ### Claude Code Integration
 ```bash
-# Windows
+# stdio (Windows)
 claude mcp add outlook -- C:\path\to\OutlookMCP\venv\Scripts\python.exe outlook_mcp_server.py
 
-# macOS/Linux
+# stdio (macOS/Linux)
 claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server.py
+
+# HTTP (remote server running with transport = "http"; headers are sent on every request)
+claude mcp add --transport http outlook http://server:8000/mcp \
+  --header "X-Outlook-Client-Id: ..." \
+  --header "X-Outlook-Client-Secret: ..." \
+  --header "X-Outlook-Tenant-Id: ..."
 ```
 
 ## Key Implementation Details
@@ -250,10 +285,23 @@ claude mcp add outlook -- /path/to/OutlookMCP/venv/bin/python outlook_mcp_server
 
 | Module | Purpose |
 |--------|---------|
-| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle), `GraphClient` (async HTTP) |
+| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, accepts a shared token cache), `GraphClient` (async HTTP), `load_token_cache()`, `CredentialsError` |
+| `outlook_mcp/config.py` | `ServerConfig` + `load_config()`: TOML file lookup and validation for transport / bind_host / bind_port |
 | `outlook_mcp/models.py` | All Pydantic v2 input models with validation |
 | `outlook_mcp/helpers.py` | `format_email_summary()`, `format_event_summary()`, `handle_graph_error()`, `make_recipients()` |
-| `outlook_mcp/server.py` | FastMCP setup, lifespan context, all 17 `@mcp.tool()` definitions, `main()` entry point |
+| `outlook_mcp/server.py` | `MCPServer` setup, lifespan (`GraphClientPool`), credential resolution (`credentials_from_env()` / `credentials_from_headers()` / `_get_graph()`), all `@mcp.tool()` definitions, `main()` entry point |
+
+### Credential Resolution (`_get_graph`)
+
+`_get_graph(ctx)` decides the credential source from the transport, not from a
+flag: over HTTP the SDK attaches the Starlette `Request` to
+`ctx.request_context.request`, and the `X-Outlook-*` headers of that request
+are authoritative; over stdio the request is `None` and the `OUTLOOK_*`
+variables read at startup are used. The lifespan holds a `GraphClientPool`
+that creates one `AuthManager`/`GraphClient` per distinct credential set on
+first use; all of them share one MSAL token cache (entries are keyed by client
+id, one `serialize()` persists them all), so several app registrations can be
+served by one HTTP process as long as `outlook_mcp_auth.py` was run for each.
 
 ### MCP Tool Categories
 
@@ -337,8 +385,9 @@ python tests\test_mcp_server.py --quick    # Handshake + profile only
 
 # 4. Test via Claude Desktop (restart Claude Desktop to reload server)
 
-# 5. For HTTP mode testing:
-python outlook_mcp_server.py --http --port 8000
+# 5. HTTP transport test (temporary config on a free port, creds sent as headers,
+#    server env stripped of OUTLOOK_*):
+python tests\test_http_server.py
 ```
 
 **macOS/Linux:**
@@ -358,8 +407,9 @@ python tests/test_mcp_server.py --quick    # Handshake + profile only
 
 # 4. Test via Claude Desktop (restart Claude Desktop to reload server)
 
-# 5. For HTTP mode testing:
-python outlook_mcp_server.py --http --port 8000
+# 5. HTTP transport test (temporary config on a free port, creds sent as headers,
+#    server env stripped of OUTLOOK_*):
+python tests/test_http_server.py
 ```
 
 ### Adding New Tools
@@ -392,11 +442,12 @@ async def my_new_tool(params: MyNewToolInput, ctx: Context = None) -> str:
 
 ### Debugging
 
-- Server logs go to stderr (FastMCP handles logging setup)
+- Server logs go to stderr (the SDK's `MCPServer` configures logging); the HTTP startup banner is printed to stderr too, never to stdout
 - Token cache issues: delete `~/.outlook_mcp_token_cache.json` and re-auth
+- "No valid token available" with a fresh cache and `AADSTS700016` from MSAL means the app registration behind the client id no longer exists in the directory: that is an Azure-side problem, not a code regression
 - Graph API errors: check response body in exception (includes error code and message)
 - Rate limiting: Graph returns 429 with Retry-After header (not auto-handled currently)
-- The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it. FastMCP's `Settings` would otherwise `stat("./.env")` at construction time (pydantic-settings `env_file`), and a CWD the server user cannot traverse (e.g. a daemon started from another user's 0700 home) turns that into `PermissionError: [Errno 13] Permission denied: '.env'` before the transport is up. `server.py` disables that lookup (`FastMCPSettings.model_config["env_file"] = None`); configuration comes from `OUTLOOK_*` environment variables only
+- The server must never depend on its working directory: a stdio server inherits the CWD of whatever host spawned it, which may not even be traversable by the server's user (e.g. a daemon started from another user's 0700 home). With mcp SDK 1.x this used to crash at startup because FastMCP's pydantic-settings probed `./.env`; SDK 2.x reads no `.env` / `MCP_*` at all, and every path this project resolves itself (`outlook_mcp.toml`, the `.env` loaded by the entry-point wrapper) is anchored to the project directory via `__file__`, never to the CWD. Keep it that way
 
 ## Microsoft Graph API Quirks
 

@@ -5,8 +5,13 @@ Thin wrapper that imports and runs the MCP server from the outlook_mcp package.
 See outlook_mcp/server.py for the full implementation.
 
 Usage:
-    python outlook_mcp_server.py          # stdio transport (for Claude Desktop)
-    python outlook_mcp_server.py --http   # HTTP transport (for remote)
+    python outlook_mcp_server.py                      # transport from outlook_mcp.toml
+    python outlook_mcp_server.py --config /etc/x.toml # explicit configuration file
+
+The transport (stdio or http) and the HTTP bind host/port are read from the
+TOML configuration file (see outlook_mcp.toml.example), never from flags.
+Credentials come from OUTLOOK_* environment variables in stdio mode and from
+the X-Outlook-* request headers in HTTP mode.
 """
 
 import os
