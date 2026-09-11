@@ -2,7 +2,7 @@
 
 from typing import Any, Literal, Optional, List, get_args
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 from .contacts import birthday_value, month_day
 
@@ -373,6 +373,15 @@ class ListContactsInput(BaseModel):
             "in the Birthdays calendar, '2026-06-07' for 7 June), or '--MM-DD'."
         ),
     )
+    folder: Optional[str] = Field(
+        default=None,
+        description=(
+            "Only the contacts filed in this folder, not in its subfolders: its "
+            "name as outlook_list_contact_folders shows it (case and accents "
+            "ignored), its ID, or 'contacts' for the default folder. Omit for "
+            "every folder."
+        ),
+    )
     top: int = Field(default=50, description="Max contacts to return", ge=1, le=200)
     skip: int = Field(default=0, description="Number of matching contacts to skip (pagination)", ge=0)
 
@@ -407,6 +416,7 @@ class UpdateContactInput(BaseModel):
     given_name: Optional[str] = Field(default=None, description="New given (first) name")
     surname: Optional[str] = Field(default=None, description="New surname (last name)")
     nickname: Optional[str] = Field(default=None, description="New nickname")
+    company_name: Optional[str] = Field(default=None, description="New company name; '' removes it")
     email_addresses: Optional[List[str]] = Field(
         default=None,
         max_length=3,
@@ -457,6 +467,118 @@ class DeleteContactInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     contact_id: str = Field(..., description="ID of the contact to delete", min_length=1)
+
+
+class CreateContactInput(BaseModel):
+    """Input for creating a contact."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    folder: str = Field(
+        default="contacts",
+        min_length=1,
+        description=(
+            "The contact folder to create it in: its name as "
+            "outlook_list_contact_folders shows it (case and accents ignored), "
+            "its ID, or 'contacts', the default, for the main Contacts folder."
+        ),
+    )
+    display_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "The name the contact is listed and its birthday shown under. Omit "
+            "to let Outlook compose it from the given name and surname."
+        ),
+    )
+    given_name: Optional[str] = Field(default=None, description="Given (first) name")
+    surname: Optional[str] = Field(default=None, description="Surname (last name)")
+    nickname: Optional[str] = Field(default=None, description="Nickname")
+    company_name: Optional[str] = Field(default=None, description="Company name")
+    email_addresses: Optional[List[str]] = Field(
+        default=None, max_length=3, description="Email addresses, at most three (Outlook's limit)"
+    )
+    mobile_phone: Optional[str] = Field(default=None, description="Mobile phone number")
+    home_phones: Optional[List[str]] = Field(
+        default=None, max_length=2, description="Home phone numbers, at most two"
+    )
+    business_phones: Optional[List[str]] = Field(
+        default=None, max_length=2, description="Business phone numbers, at most two"
+    )
+    birthday: Optional[str] = Field(
+        default=None,
+        description=(
+            "Birthday as 'YYYY-MM-DD', e.g. '2016-06-07'. It puts the contact in "
+            "the Birthdays calendar."
+        ),
+    )
+    personal_notes: Optional[str] = Field(default=None, description="Notes on the contact")
+
+    @field_validator("birthday")
+    @classmethod
+    def validate_birthday(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            birthday_value(v)
+        return v or None
+
+    @model_validator(mode="after")
+    def says_who(self) -> "CreateContactInput":
+        if not any((
+            self.display_name, self.given_name, self.surname, self.nickname,
+            self.company_name, self.email_addresses, self.mobile_phone,
+            self.home_phones, self.business_phones,
+        )):
+            raise ValueError("A contact needs at least a name, an email address or a phone number.")
+        return self
+
+
+# Contacts one outlook_move_contacts call takes. Each costs four sequential
+# requests, so a full call answers in some twenty seconds.
+MOVE_BATCH = 25
+
+
+class MoveContactsInput(BaseModel):
+    """Input for moving contacts into another contact folder."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    contact_ids: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=MOVE_BATCH,
+        description=(
+            f"IDs of the contacts to move, as outlook_list_contacts shows them, at "
+            f"most {MOVE_BATCH} per call. outlook_list_contacts with `folder` lists "
+            f"the contacts of one folder."
+        ),
+    )
+    destination_folder: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "The folder to move them into: its name as outlook_list_contact_folders "
+            "shows it (case and accents ignored), its ID, or 'contacts' for the "
+            "default folder."
+        ),
+    )
+
+    @field_validator("contact_ids")
+    @classmethod
+    def validate_contact_ids(cls, v: List[str]) -> List[str]:
+        if any(not contact_id for contact_id in v):
+            raise ValueError("A contact ID cannot be empty.")
+        return v
+
+
+class DeleteContactFolderInput(BaseModel):
+    """Input for deleting an empty contact folder. It goes to Deleted Items, recoverable."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    folder: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "The folder to delete: its name as outlook_list_contact_folders shows "
+            "it (case and accents ignored), or its ID. It has to be empty."
+        ),
+    )
 
 
 class DeleteAttachmentFilesInput(BaseModel):

@@ -1,7 +1,7 @@
 # Outlook MCP Server
 
 MCP (Model Context Protocol) server that connects Claude to Microsoft Outlook
-via the Microsoft Graph API. 24 tools covering email, calendar, contacts and
+via the Microsoft Graph API. 28 tools covering email, calendar, contacts and
 profile, over stdio or streamable HTTP.
 
 ## Features
@@ -36,13 +36,18 @@ profile, over stdio or streamable HTTP.
 ### Contacts
 | Tool | Description |
 |------|-------------|
-| `outlook_list_contacts` | List contacts from every contact folder with name, email, phone, birthday and folder; search by name or address, or by day of birth (e.g. the date of a Birthdays calendar entry) |
+| `outlook_list_contacts` | List contacts from every contact folder, or one, with name, email, phone, birthday and folder; search by name or address, or by day of birth (e.g. the date of a Birthdays calendar entry) |
 | `outlook_get_contact` | Everything a contact holds: names, emails, phones, addresses, dates, notes |
-| `outlook_update_contact` | Change names, email addresses, phone numbers, birthday or notes |
+| `outlook_create_contact` | Create a contact, in the default folder or a named one |
+| `outlook_update_contact` | Change names, company, email addresses, phone numbers, birthday or notes |
 | `outlook_delete_contact` | Delete a contact, to Deleted Items |
+| `outlook_list_contact_folders` | The contact folders, nested, with how many contacts each holds |
+| `outlook_move_contacts` | Move up to 25 contacts into another folder, every property included (not those with a photo) |
+| `outlook_delete_contact_folder` | Delete an empty contact folder, to Deleted Items |
 
 Enough to merge duplicates: find them, read the one to drop, carry what it has
-over to the one kept, delete it.
+over to the one kept, delete it. And to retire a folder a phone used to sync
+into: move its contacts out, then delete it.
 
 ### Profile
 | Tool | Description |
@@ -118,7 +123,7 @@ OutlookMCP/
 │   ├── attachments.py          # Inline and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
 │   ├── models.py               # Pydantic input models
-│   └── tools/                  # The 24 tools
+│   └── tools/                  # The 28 tools
 │       ├── mail.py
 │       ├── calendar.py
 │       ├── contacts.py
@@ -155,6 +160,7 @@ Once configured, you can ask Claude:
 - *"Cancel Friday's meeting"*
 - *"Accept the meeting invitation for tomorrow"*
 - *"The Birthdays calendar shows Gabriele twice on 7 June: merge the duplicate contacts"*
+- *"My phone no longer syncs: move its contacts into Contacts and delete its folder"*
 
 ---
 

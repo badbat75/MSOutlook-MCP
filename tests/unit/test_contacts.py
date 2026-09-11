@@ -7,6 +7,12 @@ make easy: /me/contacts is the default folder only, a name cannot be searched
 for with $filter, an update that leaves out displayName may regenerate it, and a
 delete has been seen answering 404 while carrying itself out. These tests pin
 what the tools do about each, against a fake Graph shaped like the real mailbox.
+
+The folder tools came with the next request: fold the folder a phone synced
+into back into the default one. Graph cannot move a contact, only copy it and
+delete the original, and a copy carrying a photo was seen to vanish once its
+original was deleted; the move tests pin the copy, the checks around it and
+the refusals.
 """
 
 from datetime import date
@@ -20,16 +26,23 @@ from outlook_mcp import contacts as contacts_module
 from outlook_mcp.app import mcp
 from outlook_mcp.contacts import (
     BIRTHDAY_TIME,
+    ContactFolder,
     birthday_date,
     birthday_value,
+    copy_of,
+    find_folder,
+    lost_fields,
     matches,
     month_day,
     sort_key,
 )
 from outlook_mcp.models import (
+    CreateContactInput,
+    DeleteContactFolderInput,
     DeleteContactInput,
     GetContactInput,
     ListContactsInput,
+    MoveContactsInput,
     UpdateContactInput,
 )
 from outlook_mcp.tools import contacts as tools
@@ -73,6 +86,12 @@ def not_found(method, url):
     return httpx.HTTPStatusError("404", request=request, response=response)
 
 
+def server_error(method, url):
+    request = httpx.Request(method, f"https://graph.microsoft.com/v1.0{url}")
+    response = httpx.Response(500, request=request, json={"error": {"code": "boom", "message": "boom"}})
+    return httpx.HTTPStatusError("500", request=request, response=response)
+
+
 class FakeGraph:
     """A mailbox with a default folder, a phone's folder in it, and one nested deeper."""
 
@@ -83,16 +102,26 @@ class FakeGraph:
             "F-nested": ("Family", [NESTED]),
         }
         self.children = {"F-default": ["F-phone"], "F-phone": ["F-nested"], "F-nested": []}
+        # Items Graph counts in a folder ($count) without listing them as contacts.
+        self.hidden = {}
+        self.photos = {}
+        # Properties a create leaves out of the contact it makes.
+        self.drop_on_create = set()
         self.deleted_items = []
+        self.deleted_folders = []
         self.delete_answers_404 = False
+        self.created = 0
         self.calls = []
 
-    def _contact(self, cid):
-        for _, items in self.folders.values():
+    def _locate(self, cid):
+        for folder, (_, items) in self.folders.items():
             for item in items:
                 if item["id"] == cid:
-                    return item
-        return None
+                    return folder, item
+        return None, None
+
+    def _contact(self, cid):
+        return self._locate(cid)[1]
 
     async def get(self, endpoint, params=None, headers=None):
         self.calls.append(("GET", endpoint, params))
@@ -105,24 +134,32 @@ class FakeGraph:
             return {"value": [{"id": f, "displayName": self.folders[f][0]} for f in self.children[parent]]}
         if endpoint == "/me/contactFolders/deleteditems/contacts":
             return {"value": list(self.deleted_items)}
-        if endpoint == "/me/contactFolders/F-phone/contacts":
-            # Two pages, the second behind an absolute @odata.nextLink.
-            return {"value": [ON_PHONE], "@odata.nextLink": NEXT_LINK}
         if endpoint == NEXT_LINK:
-            return {"value": [ON_PHONE_PAGE_2]}
+            return {"value": list(self.folders["F-phone"][1][1:])}
         if endpoint.startswith("/me/contactFolders/") and endpoint.endswith("/contacts"):
-            return {"value": list(self.folders[endpoint.split("/")[3]][1])}
+            folder = endpoint.split("/")[3]
+            items = list(self.folders[folder][1])
+            if (params or {}).get("$count") == "true":
+                return {"value": items[:1], "@odata.count": len(items) + self.hidden.get(folder, 0)}
+            if folder == "F-phone" and len(items) > 1:
+                # Two pages, the second behind an absolute @odata.nextLink.
+                return {"value": items[:1], "@odata.nextLink": NEXT_LINK}
+            return {"value": items}
         if endpoint.startswith("/me/contactFolders/"):
             folder = self.folders.get(endpoint.split("/")[3])
             if folder is None:
                 raise not_found("GET", endpoint)
             return {"displayName": folder[0]}
         if endpoint.startswith("/me/contacts/"):
-            found = self._contact(endpoint.split("/")[3])
+            folder, found = self._locate(endpoint.split("/")[3])
             if found is None:
                 raise not_found("GET", endpoint)
-            return dict(found)
+            return {"parentFolderId": folder, **found}
         raise AssertionError(f"unexpected GET {endpoint}")
+
+    async def get_bytes(self, endpoint):
+        self.calls.append(("GET BYTES", endpoint, None))
+        return self.photos.get(endpoint.split("/")[3])
 
     async def patch(self, endpoint, json_data=None):
         self.calls.append(("PATCH", endpoint, json_data))
@@ -130,6 +167,13 @@ class FakeGraph:
 
     async def delete(self, endpoint):
         self.calls.append(("DELETE", endpoint, None))
+        if endpoint.startswith("/me/contactFolders/"):
+            folder = endpoint.split("/")[3]
+            self.deleted_folders.append(folder)
+            for children in self.children.values():
+                if folder in children:
+                    children.remove(folder)
+            return {"status": "success"}
         cid = endpoint.split("/")[3]
         for name, items in self.folders.values():
             for item in list(items):
@@ -142,6 +186,16 @@ class FakeGraph:
 
     async def post(self, endpoint, json_data=None):
         self.calls.append(("POST", endpoint, json_data))
+        if endpoint.startswith("/me/contactFolders/") and endpoint.endswith("/contacts"):
+            folder = endpoint.split("/")[3]
+            self.created += 1
+            kept = {k: v for k, v in json_data.items() if k not in self.drop_on_create}
+            item = {
+                **kept, "id": f"C-new{self.created}", "parentFolderId": folder,
+                "createdDateTime": "2026-09-11T18:00:00Z",
+            }
+            self.folders[folder][1].append(item)
+            return dict(item)
         return {"status": "success"}
 
     def sent(self, method):
@@ -172,6 +226,34 @@ def update(cid="C-keeper", **fields):
 
 def delete(cid):
     return anyio.run(tools.outlook_delete_contact, DeleteContactInput(contact_id=cid), None)
+
+
+def create(**fields):
+    return anyio.run(tools.outlook_create_contact, CreateContactInput(**fields), None)
+
+
+def list_folders():
+    return anyio.run(tools.outlook_list_contact_folders, None)
+
+
+def delete_folder(folder):
+    return anyio.run(tools.outlook_delete_contact_folder, DeleteContactFolderInput(folder=folder), None)
+
+
+def move(ids, destination):
+    return anyio.run(
+        tools.outlook_move_contacts,
+        MoveContactsInput(contact_ids=ids, destination_folder=destination),
+        None,
+    )
+
+
+def posted(graph):
+    return [(call[1], call[2]) for call in graph.calls if call[0] == "POST"]
+
+
+def deleted(graph):
+    return [call[1] for call in graph.calls if call[0] == "DELETE"]
 
 
 class TestMatching:
@@ -360,6 +442,10 @@ class TestUpdating:
         assert body["mobilePhone"] == ""
         assert body["homePhones"] == ["+39 06 1"]
 
+    def test_the_company(self, graph):
+        update(company_name="ACME")
+        assert graph.sent("PATCH") == {"companyName": "ACME", "displayName": "Gabriele De Simoni"}
+
     def test_nothing_to_do_is_said_and_nothing_is_asked(self, graph):
         assert update() == "No updates specified."
         assert graph.calls == []
@@ -406,22 +492,332 @@ class TestDeleting:
         assert not [c for c in graph.calls if c[0] == "DELETE"]
 
 
+PHONE_FOLDER = "HUAWEI P40 Pro (contacts synced by Link to Windows)"
+FOLDERS = [
+    ContactFolder("F-default", "Contacts"),
+    ContactFolder("F-phone", PHONE_FOLDER, 1, "F-default"),
+    ContactFolder("F-nested", "Famiglia Città", 2, "F-phone"),
+]
+
+
+class TestFindingAFolder:
+    def test_the_default_folder_by_its_well_known_name(self):
+        assert find_folder(FOLDERS, "contacts") == FOLDERS[0]
+        assert find_folder(FOLDERS, " CONTACTS ") == FOLDERS[0]
+
+    def test_a_name_ignoring_case_and_accents(self):
+        assert find_folder(FOLDERS, "famiglia citta").id == "F-nested"
+        assert find_folder(FOLDERS, PHONE_FOLDER.lower()).id == "F-phone"
+
+    def test_an_id(self):
+        assert find_folder(FOLDERS, "F-phone").name == PHONE_FOLDER
+
+    def test_a_fragment_is_not_a_name_and_the_folders_are_named(self):
+        # Contacts are moved into a folder found this way, and folders deleted.
+        with pytest.raises(ValueError, match="The contact folders are: 'Contacts', 'HUAWEI"):
+            find_folder(FOLDERS, "HUAWEI")
+
+    def test_two_folders_of_one_name_need_an_id(self):
+        twins = FOLDERS + [ContactFolder("F-twin", "Famiglia Città", 1, "F-default")]
+        with pytest.raises(ValueError, match="by its ID"):
+            find_folder(twins, "Famiglia Città")
+
+
+class TestListingFolders:
+    def test_nested_with_counts_and_ids(self, graph):
+        result = list_folders()
+
+        assert "3, 7 contacts in all" in result
+        assert "- **Contacts** (default): 4 contacts | ID: `F-default`" in result
+        # The phone's folder counted across both of its pages.
+        assert "\n  - **HUAWEI P40 Pro**: 2 contacts | ID: `F-phone`" in result
+        assert "\n    - **Family**: 1 contact | ID: `F-nested`" in result
+
+    def test_items_graph_counts_but_does_not_list_are_shown(self, graph):
+        # Measured: the real default folder counts 164 items and lists 162.
+        graph.hidden["F-default"] = 2
+        assert "4 contacts and 2 other items not listed as contacts" in list_folders()
+
+
+class TestListingOneFolder:
+    def test_only_that_folder_not_the_ones_inside_it(self, graph):
+        result = list_contacts(folder="huawei p40 pro", top=200)
+
+        assert "2 in HUAWEI P40 Pro" in result
+        assert "Papà" in result and "Zoe" in result
+        assert "Nicolò" not in result, "Family is inside it, and not asked for"
+        assert "Gabriele" not in result
+
+    def test_the_default_folder_by_its_well_known_name(self, graph):
+        result = list_contacts(folder="contacts", top=200)
+        assert "4 in Contacts" in result
+        assert "C-phone1" not in result and "C-nested" not in result
+
+    def test_nothing_found_names_the_folder(self, graph):
+        assert list_contacts(folder="Family", search="zoe") == "No contacts matching 'zoe' in Family."
+
+    def test_an_unknown_folder_says_which_there_are(self, graph):
+        result = list_contacts(folder="Nope")
+        assert result.startswith("Error")
+        assert "'Contacts', 'HUAWEI P40 Pro', 'Family'" in result
+
+
+class TestCreating:
+    def test_into_the_default_folder(self, graph):
+        result = create(
+            given_name="Zoe", surname="Rossi", company_name="ACME", mobile_phone="+39 1",
+            email_addresses=["zoe@example.com"], birthday="2016-06-07",
+        )
+
+        assert posted(graph) == [("/me/contactFolders/F-default/contacts", {
+            "givenName": "Zoe", "surname": "Rossi", "companyName": "ACME", "mobilePhone": "+39 1",
+            "birthday": "2016-06-07T11:59:00Z",
+            "emailAddresses": [{"address": "zoe@example.com", "name": "zoe@example.com"}],
+        })]
+        assert "Contact created in **Contacts**" in result
+        assert "Folder: Contacts" in result
+        assert "ID: `C-new1`" in result
+
+    def test_into_a_folder_named_by_its_name(self, graph):
+        result = create(folder="family", display_name="Nonna")
+        assert posted(graph) == [("/me/contactFolders/F-nested/contacts", {"displayName": "Nonna"})]
+        assert "Contact created in **Family**" in result
+
+    def test_the_display_name_is_left_to_outlook_unless_given(self, graph):
+        create(given_name="Zoe", surname="Rossi")
+        assert "displayName" not in posted(graph)[0][1]
+
+    def test_an_unknown_folder_creates_nothing(self, graph):
+        assert create(folder="Nope", given_name="Zoe").startswith("Error")
+        assert posted(graph) == []
+
+    def test_a_contact_needs_something_to_know_it_by(self):
+        with pytest.raises(ValidationError, match="at least a name"):
+            CreateContactInput()
+        with pytest.raises(ValidationError, match="at least a name"):
+            CreateContactInput(birthday="2016-06-07", personal_notes="who?")
+        assert CreateContactInput(mobile_phone="+39 1").mobile_phone == "+39 1"
+
+    def test_outlook_s_limits_are_refused_before_graph_sees_them(self):
+        with pytest.raises(ValidationError):
+            CreateContactInput(given_name="x", email_addresses=["a@x", "b@x", "c@x", "d@x"])
+        with pytest.raises(ValidationError):
+            CreateContactInput(given_name="x", business_phones=["1", "2", "3"])
+        with pytest.raises(ValidationError):
+            CreateContactInput(given_name="x", birthday="07/06/2016")
+
+    def test_an_empty_birthday_is_no_birthday(self, graph):
+        create(given_name="Zoe", birthday="")
+        assert "birthday" not in posted(graph)[0][1]
+
+
+class TestDeletingFolders:
+    def test_an_empty_folder_goes_to_deleted_items(self, graph):
+        graph.folders["F-nested"] = ("Family", [])
+        result = delete_folder("family")
+
+        assert ("DELETE", "/me/contactFolders/F-nested", None) in graph.calls
+        assert "Contact folder **Family** moved to Deleted Items" in result
+
+    def test_a_folder_with_contacts_is_left_alone(self, graph):
+        result = delete_folder("Family")
+        assert result.startswith("Not deleted") and "1 contact" in result
+        assert graph.deleted_folders == []
+
+    def test_items_that_are_not_contacts_count_too(self, graph):
+        graph.folders["F-nested"] = ("Family", [])
+        graph.hidden["F-nested"] = 1
+        result = delete_folder("Family")
+        assert result.startswith("Not deleted") and "1 other item" in result
+        assert graph.deleted_folders == []
+
+    def test_a_folder_with_subfolders_is_left_alone(self, graph):
+        graph.folders["F-phone"] = ("HUAWEI P40 Pro", [])
+        result = delete_folder("HUAWEI P40 Pro")
+        assert result.startswith("Not deleted") and "has subfolders (Family)" in result
+        assert graph.deleted_folders == []
+
+    def test_the_default_folder_is_never_deleted(self, graph):
+        assert "default contact folder" in delete_folder("contacts")
+        assert graph.deleted_folders == []
+
+    def test_an_unknown_folder_is_an_error(self, graph):
+        assert delete_folder("Nope").startswith("Error")
+        assert graph.deleted_folders == []
+
+
+# A contact the way the phone's folder holds it on the real mailbox, with what
+# Graph adds to it on reading: the sync's category, an address of empty
+# strings, the personal-account echo of the first email address, and the
+# properties only Graph sets.
+SYNCED = contact(
+    "C-phone1", "Papà", givenName="Papà", mobilePhone="+39 333 000", homePhones=["+39 06 000"],
+    categories=[PHONE_FOLDER], birthday="1950-01-02T11:59:00Z",
+    emailAddresses=[{"name": "Papà", "address": "papa@example.com"}],
+    primaryEmailAddress={"name": "Papà", "address": "papa@example.com"},
+    homeAddress={"street": "", "city": "Roma", "state": "", "countryOrRegion": "", "postalCode": ""},
+    changeKey="EQAAAB", createdDateTime="2024-03-01T10:00:00Z",
+    lastModifiedDateTime="2024-03-02T10:00:00Z", **{"@odata.etag": 'W/"EQAAAB"'},
+)
+
+
+class TestCopying:
+    def test_what_graph_sets_itself_stays_behind(self):
+        assert copy_of({**SYNCED, "parentFolderId": "F-phone"}) == {
+            "displayName": "Papà", "givenName": "Papà", "mobilePhone": "+39 333 000",
+            "homePhones": ["+39 06 000"], "categories": [PHONE_FOLDER],
+            "birthday": "1950-01-02T11:59:00Z",
+            "emailAddresses": [{"name": "Papà", "address": "papa@example.com"}],
+            "homeAddress": {"street": "", "city": "Roma", "state": "", "countryOrRegion": "", "postalCode": ""},
+        }
+
+    def test_a_faithful_copy_lost_nothing(self):
+        # A new item has its own ID, change key and dates: none of that is loss.
+        assert lost_fields(SYNCED, {**copy_of(SYNCED), "id": "C-new", "changeKey": "x"}) == []
+
+    def test_a_value_missing_or_changed_is_lost(self):
+        copy = {**copy_of(SYNCED), "mobilePhone": "+39 000"}
+        del copy["categories"]
+        assert lost_fields(SYNCED, copy) == ["categories", "mobilePhone"]
+
+    def test_an_empty_property_has_nothing_to_lose(self):
+        empty = {"homeAddress": {"street": "", "city": ""}, "nickName": "", "children": [], "birthday": None}
+        assert lost_fields(empty, {}) == []
+
+
+class TestMoving:
+    @pytest.fixture
+    def phone(self, graph):
+        graph.folders["F-phone"][1][0] = dict(SYNCED)
+        return graph
+
+    def test_out_of_the_phone_folder_into_the_default_one(self, phone):
+        result = move(["C-phone1"], "contacts")
+
+        assert posted(phone) == [("/me/contactFolders/F-default/contacts", copy_of(SYNCED))]
+        assert deleted(phone) == ["/me/contacts/C-phone1"]
+        assert "Moved 1 of 1** to **Contacts**" in result
+        assert "✅ **Papà**: new ID `C-new1`" in result
+        assert "originals are in Deleted Items" in result
+        assert [c["id"] for c in phone.folders["F-phone"][1]] == ["C-phone2"]
+        assert phone.folders["F-default"][1][-1]["categories"] == [PHONE_FOLDER]
+
+    def test_the_copy_is_made_before_the_original_goes(self, phone):
+        move(["C-phone1"], "contacts")
+        writes = [call[0] for call in phone.calls if call[0] in ("POST", "DELETE")]
+        assert writes == ["POST", "DELETE"]
+
+    def test_several_in_one_call(self, phone):
+        result = move(["C-phone1", "C-phone2"], "Contacts")
+        assert "Moved 2 of 2" in result
+        assert phone.folders["F-phone"][1] == []
+
+    def test_one_already_there_is_left_alone(self, graph):
+        result = move(["C-keeper"], "contacts")
+        assert "⏭️ **Gabriele De Simoni**: already in Contacts" in result
+        assert "Moved 0 of 1" in result
+        assert posted(graph) == [] and deleted(graph) == []
+
+    def test_a_contact_with_a_photo_is_left_where_it_is(self, phone):
+        # Measured: a copy carrying the same photo vanished once the original
+        # was deleted, from every folder and from Deleted Items.
+        phone.photos["C-phone1"] = (b"\xff\xd8", "image/jpeg")
+        result = move(["C-phone1"], "contacts")
+        assert "not moved, it has a photo" in result
+        assert posted(phone) == [] and deleted(phone) == []
+
+    def test_an_unknown_id_is_reported_and_the_rest_still_move(self, phone):
+        result = move(["C-nope", "C-phone2"], "contacts")
+        assert "❌ `C-nope`: no such contact" in result
+        assert "Moved 1 of 2" in result
+
+    def test_a_copy_missing_something_is_undone_and_the_original_kept(self, phone):
+        phone.drop_on_create = {"homePhones"}
+        result = move(["C-phone1"], "contacts")
+
+        assert "the copy came back without homePhones" in result
+        assert deleted(phone) == ["/me/contacts/C-new1"]
+        assert phone._contact("C-phone1") is not None
+        assert "Moved 0 of 1" in result
+
+    def test_a_404_for_a_delete_that_happened_still_moves(self, phone):
+        phone.delete_answers_404 = True
+        assert "Moved 1 of 1" in move(["C-phone1"], "contacts")
+
+    def test_an_original_that_cannot_be_deleted_stops_the_call(self, phone):
+        async def refuse(endpoint):
+            phone.calls.append(("DELETE", endpoint, None))
+            raise server_error("DELETE", endpoint)
+
+        phone.delete = refuse
+        result = move(["C-phone1", "C-phone2"], "contacts")
+
+        assert "copied into Contacts (new ID `C-new1`)" in result
+        assert "delete the original, `C-phone1`" in result
+        assert "Not attempted: `C-phone2`" in result
+        assert "Moved 0 of 2" in result
+
+    def test_an_error_before_the_copy_stops_the_call_with_nothing_changed(self, phone):
+        async def fail(endpoint, json_data=None):
+            raise server_error("POST", endpoint)
+
+        phone.post = fail
+        result = move(["C-phone1", "C-phone2"], "contacts")
+
+        assert "❌ `C-phone1`: Error 500" in result
+        assert "Not attempted: `C-phone2`" in result
+        assert deleted(phone) == []
+
+    def test_an_unknown_destination_moves_nothing(self, phone):
+        assert move(["C-phone1"], "Nope").startswith("Error")
+        assert posted(phone) == []
+
+    def test_a_call_takes_one_to_twenty_five(self):
+        with pytest.raises(ValidationError):
+            MoveContactsInput(contact_ids=[], destination_folder="contacts")
+        with pytest.raises(ValidationError):
+            MoveContactsInput(contact_ids=[f"C{i}" for i in range(26)], destination_folder="contacts")
+        with pytest.raises(ValidationError):
+            MoveContactsInput(contact_ids=["C1", ""], destination_folder="contacts")
+        assert len(MoveContactsInput(contact_ids=[f"C{i}" for i in range(25)], destination_folder="x").contact_ids) == 25
+
+
 class TestWhatTheClientSees:
     @staticmethod
-    def schema_of(tool_name):
-        tools_by_name = {tool.name: tool for tool in anyio.run(mcp.list_tools)}
-        schema = tools_by_name[tool_name].input_schema
+    def tool(tool_name):
+        return {tool.name: tool for tool in anyio.run(mcp.list_tools)}[tool_name]
+
+    @classmethod
+    def schema_of(cls, tool_name):
+        schema = cls.tool(tool_name).input_schema
         params = schema["properties"]["params"]
         if "$ref" in params:
             params = schema["$defs"][params["$ref"].rsplit("/", 1)[-1]]
         return params["properties"]
 
-    def test_the_four_tools_are_registered(self):
+    def test_the_contact_tools_are_registered(self):
         names = {tool.name for tool in anyio.run(mcp.list_tools)}
         assert {
-            "outlook_list_contacts", "outlook_get_contact",
+            "outlook_list_contacts", "outlook_get_contact", "outlook_create_contact",
             "outlook_update_contact", "outlook_delete_contact",
+            "outlook_list_contact_folders", "outlook_move_contacts",
+            "outlook_delete_contact_folder",
         } <= names
+
+    def test_a_move_takes_the_contacts_and_where_to(self):
+        assert set(self.schema_of("outlook_move_contacts")) == {"contact_ids", "destination_folder"}
+
+    def test_listing_folders_takes_nothing(self):
+        assert not self.tool("outlook_list_contact_folders").input_schema.get("properties")
+
+    def test_create_takes_a_folder_and_the_fields_of_an_update(self):
+        created = set(self.schema_of("outlook_create_contact"))
+        updated = set(self.schema_of("outlook_update_contact"))
+        assert created - updated == {"folder"}
+        assert updated - created == {"contact_id"}
+
+    def test_deleting_a_folder_takes_the_folder_and_nothing_else(self):
+        assert set(self.schema_of("outlook_delete_contact_folder")) == {"folder"}
 
     def test_update_takes_the_fields_a_merge_needs(self):
         properties = self.schema_of("outlook_update_contact")

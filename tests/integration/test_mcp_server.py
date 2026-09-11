@@ -268,8 +268,12 @@ def test_tools_list(client):
         "outlook_respond_event",
         "outlook_list_contacts",
         "outlook_get_contact",
+        "outlook_create_contact",
         "outlook_update_contact",
         "outlook_delete_contact",
+        "outlook_list_contact_folders",
+        "outlook_move_contacts",
+        "outlook_delete_contact_folder",
     ]
     missing = [t for t in expected if t not in tool_names]
     assert not missing, f"Missing tools: {missing}"
@@ -346,6 +350,17 @@ def test_list_contacts(client):
         "arguments": {"params": {"top": 3}},
     })
     return _assert_tool_success(resp, "outlook_list_contacts")
+
+
+def test_list_contact_folders(client):
+    """Call outlook_list_contact_folders: every folder, nested, with its counts."""
+    resp = client.send("tools/call", {
+        "name": "outlook_list_contact_folders",
+        "arguments": {},
+    })
+    text = _assert_tool_success(resp, "outlook_list_contact_folders")
+    assert "(default)" in text, f"No default folder in: {text[:300]}"
+    return text
 
 
 def test_list_attachments(client):
@@ -428,6 +443,7 @@ ALL_TESTS = QUICK_TESTS + [
     ("List Calendars", test_list_calendars),
     ("List Events (today)", test_list_events),
     ("List Contacts", test_list_contacts),
+    ("List Contact Folders", test_list_contact_folders),
     ("List Attachments", test_list_attachments),
     ("Get Attachment", test_get_attachment),
 ]

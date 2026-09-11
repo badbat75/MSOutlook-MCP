@@ -385,10 +385,15 @@ class GraphClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def request(
-        self, method: str, endpoint: str, headers: Optional[dict] = None, **kwargs
-    ) -> dict:
-        """Make an authenticated request to the Graph API.
+    async def _send(
+        self,
+        method: str,
+        endpoint: str,
+        headers: Optional[dict] = None,
+        quiet: frozenset = frozenset(),
+        **kwargs,
+    ) -> httpx.Response:
+        """Send one authenticated request, raising for an error status.
 
         `headers` is added to the ones every request carries, e.g. a Prefer
         naming the time zone Graph should answer in. It cannot replace the
@@ -397,6 +402,9 @@ class GraphClient:
         `endpoint` may also be the absolute URL of an @odata.nextLink: httpx
         ignores base_url for an absolute URL, and the scopes are read off its
         path all the same.
+
+        An error status is logged unless it is in `quiet`, the statuses a
+        caller expects and handles itself.
         """
         token = await self.auth.get_token(scopes_for(endpoint))
         client = await self._get_client()
@@ -408,7 +416,7 @@ class GraphClient:
         response = await client.request(
             method, endpoint, headers=headers, **kwargs
         )
-        if response.status_code >= 400:
+        if response.status_code >= 400 and response.status_code not in quiet:
             # Log the outgoing payload and Graph's error body so 4xx/5xx causes
             # are diagnosable (httpx only logs the request line, not the body).
             logger.error(
@@ -421,11 +429,35 @@ class GraphClient:
                 response.text,
             )
         response.raise_for_status()
+        return response
+
+    async def request(
+        self, method: str, endpoint: str, headers: Optional[dict] = None, **kwargs
+    ) -> dict:
+        """Make an authenticated request to the Graph API and parse its JSON answer.
+
+        See _send() for `headers` and `endpoint`.
+        """
+        response = await self._send(method, endpoint, headers=headers, **kwargs)
         # Some Graph endpoints return an empty body: sendMail → 202 Accepted,
         # delete/update → 204 No Content. Don't try to JSON-decode those.
         if response.status_code in (202, 204) or not response.content:
             return {"status": "success"}
         return response.json()
+
+    async def get_bytes(self, endpoint: str) -> Optional[Tuple[bytes, str]]:
+        """Content Graph serves as bytes, with its media type, or None when it has none.
+
+        For media such as a contact's photo (.../photo/$value), which is a 404
+        for a contact without one: an answer, not an error worth logging.
+        """
+        try:
+            response = await self._send("GET", endpoint, quiet=frozenset({404}))
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
+        return response.content, response.headers.get("Content-Type", "application/octet-stream")
 
     async def get(
         self, endpoint: str, params: Optional[dict] = None, headers: Optional[dict] = None

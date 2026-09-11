@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides access to email, calendar and contacts through 24 MCP tools.
+Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides access to email, calendar and contacts through 28 MCP tools.
 
 **Core Architecture:**
 - **`MCPServer` from the official `mcp` SDK 2.x** (`mcp.server.mcpserver`; the 1.x `FastMCP` import no longer exists) for tool registration and server lifecycle
@@ -34,11 +34,11 @@ OutlookMCP/
 │   ├── attachments.py          # Inline (<=3MB) and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
 │   ├── models.py               # Pydantic input models
-│   └── tools/                  # The 24 @mcp.tool() definitions
+│   └── tools/                  # The 28 @mcp.tool() definitions
 │       ├── __init__.py         # Imports the four modules = registers every tool
 │       ├── mail.py             # 12 email tools
 │       ├── calendar.py         # 7 calendar tools
-│       ├── contacts.py         # 4 contact tools
+│       ├── contacts.py         # 8 contact and contact folder tools
 │       └── profile.py          # 1 profile tool
 ├── scripts/
 │   ├── deploy.sh                   # Deploy to a Linux host as a systemd service
@@ -394,13 +394,13 @@ rendered systemd unit, starts the service. The invariants behind it:
 | `outlook_mcp/server.py` | Entry point only: `_parse_args()`, `main()`, and the `from . import tools` whose side effect registers them |
 | `outlook_mcp/config.py` | `PROJECT_ROOT`, `ServerConfig` + `load_config()`, `is_loopback()`, `_validate_deployment()`. The whole configuration, and the only place any of it comes from |
 | `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_config()`, `ProxyAuthPolicy`, `Principal`, `GraphClientPool`, `current_user()`, `get_graph()`. The pool hands each `AuthManager` a path, never a preloaded cache: see "Scopes per Resource" |
-| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, one cache and one cache path per principal, `_adopt_rewritten_cache()`), `GraphClient` (async HTTP), `load_token_cache()` / `save_token_cache()` / `user_cache_path()` / `shared_cache_path()`, `CredentialsError`, `scopes_for()`, and the shared constants `GRAPH_SCOPE_URLS` (what a sign-in asks for) / `CORE_SCOPE_URLS` / `CONTACTS_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `USER_CACHE_DIR` / `authority_for()`. The two path helpers take an optional directory, `None` meaning the home-directory default, so a caller can pass `config.cache_directory` straight through |
+| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, one cache and one cache path per principal, `_adopt_rewritten_cache()`), `GraphClient` (async HTTP; `get_bytes()` for media such as a contact's photo), `load_token_cache()` / `save_token_cache()` / `user_cache_path()` / `shared_cache_path()`, `CredentialsError`, `scopes_for()`, and the shared constants `GRAPH_SCOPE_URLS` (what a sign-in asks for) / `CORE_SCOPE_URLS` / `CONTACTS_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `USER_CACHE_DIR` / `authority_for()`. The two path helpers take an optional directory, `None` meaning the home-directory default, so a caller can pass `config.cache_directory` straight through |
 | `outlook_mcp/authorize.py` | The OAuth2 authorization code flow: browser, headless, `--code` and `--user` modes. The only place that flow lives |
 | `outlook_mcp/enroll.py` | The two enrollment routes and the in-memory table of sign-ins in flight |
 | `outlook_mcp/downloads.py` | The `/attachments/<token>` route, the in-memory table of one-time links, `download_root()` / `message_dir()` (where a downloaded file goes), `offer()`, `delete_message_downloads()`, `_consume_file()` (delete on serve) and `sweep()` / `reap_expired_downloads()` (delete on expiry) |
 | `outlook_mcp/folders.py` | `WELL_KNOWN_FOLDERS`, `find_folder_id_by_name()`, `resolve_folder()`, `format_folder_tree()` |
 | `outlook_mcp/events.py` | `all_day_span()` (what Graph accepts as an all-day event), `describe_all_day()`, `read_event_times()` (an event's times in its own zone, via `Prefer: outlook.timezone`) |
-| `outlook_mcp/contacts.py` | `read_all()` (follows `@odata.nextLink`), `contact_folders()`, `read_address_book()` (every folder, each contact tagged `folderName`), `folder_name()`, `matches()` (case and accent blind), `month_day()`, `birthday_date()` / `birthday_value()` / `BIRTHDAY_TIME`, `in_deleted_items()`, `sort_key()` |
+| `outlook_mcp/contacts.py` | `read_all()` (follows `@odata.nextLink`), `ContactFolder` / `contact_folders()` (the tree, default first, with depth and parent), `find_folder()` (an ID, a whole name case and accent blind, or `contacts`), `item_count()` (Graph's `$count`), `read_address_book()` (every folder or the ones given, each contact tagged `folderName`), `folder_name()`, `matches()` (case and accent blind), `month_day()`, `birthday_date()` / `birthday_value()` / `BIRTHDAY_TIME`, `in_deleted_items()`, `copy_of()` / `lost_fields()` / `move_contact()` (copy, check, delete the original; `HalfMoved` when a contact is left twice), `sort_key()` |
 | `outlook_mcp/attachments.py` | `read_attachment_meta()`, `attach_small_file()` (<=3MB inline), `attach_large_file()` (upload session), `attach_files()` |
 | `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`, `format_attachment_summary()`, `format_contact_summary()`, `format_contact_details()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `save_attachment_to_disk()` |
 | `outlook_mcp/models.py` | All Pydantic v2 input models with validation |
@@ -599,11 +599,15 @@ Consequences worth keeping in mind:
 - `outlook_respond_event` - Accept/decline/tentative with optional comment
 - `outlook_list_calendars` - List all calendars in account
 
-**Contact Tools (4):**
-- `outlook_list_contacts` - Every contact folder, not just the default one; name, email, phone, birthday, folder, ID. `search` matches names and addresses ignoring case and accents; `birthday` takes an ISO date whose year is ignored (or `--MM-DD`), which is how to find the contacts behind a Birthdays calendar entry. Sorted by name, nameless last; `top`/`skip` page the filtered list
+**Contact Tools (8):**
+- `outlook_list_contacts` - Every contact folder, not just the default one; name, email, phone, birthday, folder, ID. `search` matches names and addresses ignoring case and accents; `birthday` takes an ISO date whose year is ignored (or `--MM-DD`), which is how to find the contacts behind a Birthdays calendar entry; `folder` keeps one folder (not the ones inside it). Sorted by name, nameless last; `top`/`skip` page the filtered list
 - `outlook_get_contact` - Everything a contact holds, so a duplicate is read before it is deleted
-- `outlook_update_contact` - Names, email addresses (at most 3), phones (mobile, at most 2 home and 2 business), birthday (`''` removes it), notes. Lists replace; the display name always goes along unless given
+- `outlook_create_contact` - The fields of an update, plus `folder` (a name, an ID, or `contacts`, the default). Needs a name, an address or a number; without `display_name` Outlook composes one from the name parts ("Zz" + "Test MCP Uno" became "Zz Test MCP Uno")
+- `outlook_update_contact` - Names, company, email addresses (at most 3), phones (mobile, at most 2 home and 2 business), birthday (`''` removes it), notes. Lists replace; the display name always goes along unless given
 - `outlook_delete_contact` - To Deleted Items, named in the answer. No permanent option, on purpose
+- `outlook_list_contact_folders` - The folder tree, default first, with each folder's contacts, what Graph counts beyond them, and its ID
+- `outlook_move_contacts` - Up to 25 IDs into one folder, one at a time: copy with every writable property, check the copy, original to Deleted Items. New ID and creation date; a contact with a photo is refused; an unexpected error stops the call and lists what was not attempted. See "Moving Contacts, and Contact Folders"
+- `outlook_delete_contact_folder` - An empty folder only (no contacts, a `$count` of 0, no subfolders), to Deleted Items; never the default one
 
 **Profile Tool (1):**
 - `outlook_get_profile` - Current user profile info
@@ -615,6 +619,11 @@ All Graph API calls go through `GraphClient.request()` in `outlook_mcp/auth.py` 
 2. Adds `Authorization: Bearer {token}` header
 3. Raises HTTP errors via `httpx.Response.raise_for_status()`
 4. Returns parsed JSON, or `{"status": "success"}` for empty-body responses (202 Accepted from `sendMail`, 204 No Content from delete/update, or any response with no body)
+
+`GraphClient.get_bytes()` is the exception: raw content and its media type (a
+contact's photo at `.../photo/$value`), and `None` for a 404, which it does not
+log. Both go through `_send()`, which logs every other error status together
+with Graph's answer.
 
 Error handling wraps Graph exceptions with `handle_graph_error()` in `outlook_mcp/helpers.py` to provide user-friendly messages.
 
@@ -704,6 +713,52 @@ was measured against the real mailbox on 2026-09-11.
   about a dozen tries since, with the server log capturing every Graph error.
   `in_deleted_items()` looks for the contact there by name and creation time
   (the move changes the ID) before a 404 is reported.
+
+### Moving Contacts, and Contact Folders
+
+Written for the next request on the same mailbox: the phone behind "HUAWEI P40
+Pro (contacts synced by Link to Windows)", a child of the default folder, no
+longer syncs, and its 115 contacts were to be folded into the default folder
+before the folder is deleted. Measured on 2026-09-11 with throwaway contacts:
+
+- **Graph can neither move nor copy a contact.** `POST /me/contacts/{id}/move`
+  and `.../copy` answer 400 "Resource not found for the segment 'move'". A move
+  is a copy made from a full GET (`copy_of()`: every property but the read-only
+  ones and the `@odata` annotations), then a soft delete of the original. The
+  copy came back equal to the original in every property. Its ID and
+  `createdDateTime` are new, and nothing can set them.
+- **A personal mailbox echoes the first three addresses** as
+  `primaryEmailAddress` / `secondaryEmailAddress` / `tertiaryEmailAddress`,
+  undocumented in v1.0. They matched `emailAddresses` in all 277 contacts; a
+  POST accepts them, and `copy_of()` leaves them out all the same.
+- **A copy carrying a photo vanishes once its original is deleted**, from every
+  folder and from Deleted Items, 10 to 45 seconds after the delete: seen three
+  times, with nothing but the photo in common. Copies with the phone's category,
+  a birthday or email addresses survived every time, whether the original was
+  deleted or kept. A photo copy whose original is kept was not tried, and the
+  mechanism is unknown. Hence `outlook_move_contacts` leaves a contact with a
+  photo where it is and says so. The phone folder has none; the default folder
+  has 4. Uploading a photo works on this account (`PUT .../photo/$value`, 200),
+  which is how it was measured, but no tool does it: do not make the move carry
+  photos without measuring first what happens to them.
+- **The copy's birthday gets its own entry** in the Birthdays calendar, and the
+  original's entry goes with the original.
+- **89 of the phone folder's contacts carry the category** "HUAWEI P40 Pro
+  (contacts synced by Link to Windows)", the sync's own tag. A move keeps it
+  like every other property: dropping it is the user's call, not the tool's.
+- **More than 4 concurrent requests per app and mailbox are throttled**: 429
+  `ApplicationThrottled`, "Application is over its MailboxConcurrency limit".
+  The move sends one request at a time and caps a call at 25 contacts, about
+  four requests each.
+- **A contact folder** has `id`, `displayName`, `parentFolderId` and
+  `wellKnownName` (`contacts` for the default one, null otherwise), and no item
+  count. `$count=true` on its `/contacts` gives one, which can exceed what the
+  folder lists: the default folder counted 164 and listed 162, the phone folder
+  115 and 115. What the other two are is unknown, so the folder delete refuses
+  any folder whose count is not 0.
+- **`DELETE /me/contactFolders/{id}` is soft**: the folder lands under
+  `/me/contactFolders/deleteditems/childFolders` (not in the mail folder tree)
+  and its ID still resolves; `permanentDelete` purges it from there.
 
 ### Well-Known Folder Names
 
@@ -799,3 +854,5 @@ is never registered.
 - **Folder moves** accept either folder ID or well-known name string
 - **Attendee types** are: `required`, `optional`, `resource`
 - **Contacts**: `/me/contacts` is the default folder only; `$filter` reaches only `emailAddresses/any(a:a/address eq ...)`; a PATCH without `displayName` may regenerate it; see "Contacts" above
+- **Contacts cannot be moved or copied**, and a copy with a photo does not survive its original's delete; see "Moving Contacts, and Contact Folders"
+- **Concurrency**: more than 4 simultaneous requests per app and mailbox get 429 `ApplicationThrottled`

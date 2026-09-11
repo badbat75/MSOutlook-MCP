@@ -6,6 +6,7 @@ to AAD before it is allowed to serve anything the cache already holds.
 """
 
 import asyncio
+import logging
 import os
 import stat
 from pathlib import Path
@@ -363,6 +364,65 @@ class TestScopesPerResource:
         answer = asyncio.run(run())
         assert asked == [CORE_SCOPE_URLS, CONTACTS_SCOPE_URLS]
         assert answer["url"] == f"{GRAPH_BASE_URL}/me/contactFolders/F1/contacts?$skip=500"
+
+
+class TestBytes:
+    """What Graph serves as bytes rather than JSON, such as a contact's photo."""
+
+    PHOTO = "/me/contacts/C1/photo/$value"
+
+    @staticmethod
+    def call(handler, use):
+        class Auth:
+            async def get_token(self, scopes=None):
+                return "at"
+
+        client = GraphClient(Auth())
+        client._client = httpx.AsyncClient(base_url=GRAPH_BASE_URL, transport=httpx.MockTransport(handler))
+
+        async def run():
+            try:
+                return await use(client)
+            finally:
+                await client.close()
+
+        return asyncio.run(run())
+
+    def test_the_bytes_come_with_their_media_type(self):
+        answer = self.call(
+            lambda request: httpx.Response(200, content=b"\xff\xd8jpeg", headers={"Content-Type": "image/jpeg"}),
+            lambda client: client.get_bytes(self.PHOTO),
+        )
+        assert answer == (b"\xff\xd8jpeg", "image/jpeg")
+
+    def test_nothing_there_is_none_and_no_error_in_the_log(self, caplog):
+        # A contact without a photo answers 404: expected, and a move asks for
+        # every contact's, so logging it as an error would bury the real ones.
+        with caplog.at_level(logging.ERROR, logger="outlook_mcp"):
+            answer = self.call(
+                lambda request: httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}}),
+                lambda client: client.get_bytes(self.PHOTO),
+            )
+        assert answer is None
+        assert not caplog.records
+
+    def test_any_other_failure_is_raised_and_logged(self, caplog):
+        with caplog.at_level(logging.ERROR, logger="outlook_mcp"):
+            with pytest.raises(httpx.HTTPStatusError):
+                self.call(
+                    lambda request: httpx.Response(500, json={"error": {"code": "boom"}}),
+                    lambda client: client.get_bytes(self.PHOTO),
+                )
+        assert caplog.records
+
+    def test_a_json_request_still_logs_a_404(self, caplog):
+        with caplog.at_level(logging.ERROR, logger="outlook_mcp"):
+            with pytest.raises(httpx.HTTPStatusError):
+                self.call(
+                    lambda request: httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}}),
+                    lambda client: client.get("/me/contacts/C1"),
+                )
+        assert caplog.records
 
 
 NOT_CONSENTED = {
