@@ -8,17 +8,25 @@ to AAD before it is allowed to serve anything the cache already holds.
 import asyncio
 import os
 import stat
+from pathlib import Path
 
+import httpx
 import msal
 import pytest
 
 from outlook_mcp.auth import (
+    CONTACTS_SCOPE_URLS,
+    CORE_SCOPE_URLS,
+    GRAPH_BASE_URL,
+    GRAPH_SCOPE_URLS,
     TOKEN_CACHE_PATH,
     USER_CACHE_DIR,
     AuthManager,
     CredentialsError,
+    GraphClient,
     load_token_cache,
     save_token_cache,
+    scopes_for,
     shared_cache_path,
     user_cache_path,
 )
@@ -32,13 +40,15 @@ class StubApp:
         self._silent_results = list(silent_results or [])
         self._client_results = list(client_results or [])
         self.silent_calls = []
+        self.silent_scopes = []
         self.client_calls = []
 
     def get_accounts(self):
         return self._accounts
 
-    def acquire_token_silent(self, scopes, account=None, force_refresh=False, **kwargs):
+    def acquire_token_silent_with_error(self, scopes, account=None, force_refresh=False, **kwargs):
         self.silent_calls.append({"force_refresh": force_refresh, "account": account})
+        self.silent_scopes.append(list(scopes))
         return self._silent_results.pop(0) if self._silent_results else None
 
     def acquire_token_for_client(self, scopes=None, **kwargs):
@@ -46,9 +56,14 @@ class StubApp:
         return self._client_results.pop(0) if self._client_results else None
 
 
-def make_manager(app, cache=None, probe=None, user=None):
+# A cache path nothing ever writes: the manager starts empty and, with the file
+# absent throughout, never believes a sign-in has rewritten it.
+NO_CACHE = Path(__file__).parent / "no-such-cache.json"
+
+
+def make_manager(app, probe=None, user=None):
     """An AuthManager wired to a stub app, with disk writes disabled."""
-    manager = AuthManager("client-id", "secret", "common", token_cache=cache, user=user)
+    manager = AuthManager("client-id", "secret", "common", cache_path=NO_CACHE, user=user)
     manager._app = app
     manager._save_cache = lambda: None
     if probe is not None:
@@ -279,6 +294,218 @@ class TestCacheWriteBack:
         manager._cache.has_state_changed = True
         manager._save_cache()
         assert not shared.exists()
+
+
+class TestScopesPerResource:
+    """A request asks for the scopes of the resource it addresses, never all of them.
+
+    Measured on a personal account: a refresh token asked for one scope its
+    user has not consented to fails the whole request (AADSTS70000). Asking for
+    everything on every request would have turned mail and calendar off for
+    each grant made before contacts existed.
+    """
+
+    @pytest.mark.parametrize("endpoint", [
+        "/me/contacts",
+        "/me/contacts/AAMk==",
+        "/me/contactFolders/contacts",
+        "/me/contactfolders/F1/childFolders",
+        "/me/contactFolders/F1/contacts",
+        "https://graph.microsoft.com/v1.0/me/contactFolders/F1/contacts?$skip=500",
+    ])
+    def test_contacts_ask_for_the_contacts_scope(self, endpoint):
+        assert scopes_for(endpoint) == CONTACTS_SCOPE_URLS
+
+    @pytest.mark.parametrize("endpoint", [
+        "/me",
+        "/me/messages",
+        "/me/mailFolders/inbox/messages",
+        "/me/events/AAMk==",
+        "/me/calendars",
+        "https://graph.microsoft.com/v1.0/me/messages?$skip=10",
+    ])
+    def test_everything_else_asks_for_the_core_scopes(self, endpoint):
+        assert scopes_for(endpoint) == CORE_SCOPE_URLS
+
+    def test_a_sign_in_asks_for_everything(self):
+        # The one place every scope is requested: the consent screen.
+        assert set(GRAPH_SCOPE_URLS) == set(CORE_SCOPE_URLS) | set(CONTACTS_SCOPE_URLS)
+        assert "https://graph.microsoft.com/Contacts.ReadWrite" in GRAPH_SCOPE_URLS
+
+    def test_get_token_asks_msal_for_the_scopes_it_is_given(self):
+        app = StubApp(silent_results=[TOKEN, TOKEN2])
+        manager = make_manager(app)
+        asyncio.run(manager.get_token())
+        asyncio.run(manager.get_token(CONTACTS_SCOPE_URLS))
+        assert app.silent_scopes == [CORE_SCOPE_URLS, CONTACTS_SCOPE_URLS]
+
+    def test_the_client_asks_for_the_scopes_of_its_endpoint(self):
+        # Through GraphClient.request, the absolute URL of a nextLink included.
+        asked = []
+
+        class RecordingAuth:
+            async def get_token(self, scopes=None):
+                asked.append(scopes)
+                return "at"
+
+        client = GraphClient(RecordingAuth())
+        client._client = httpx.AsyncClient(
+            base_url=GRAPH_BASE_URL,
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"url": str(request.url)})),
+        )
+
+        async def run():
+            await client.get("/me/messages")
+            answer = await client.get(f"{GRAPH_BASE_URL}/me/contactFolders/F1/contacts?$skip=500")
+            await client.close()
+            return answer
+
+        answer = asyncio.run(run())
+        assert asked == [CORE_SCOPE_URLS, CONTACTS_SCOPE_URLS]
+        assert answer["url"] == f"{GRAPH_BASE_URL}/me/contactFolders/F1/contacts?$skip=500"
+
+
+NOT_CONSENTED = {
+    "error": "invalid_grant",
+    "error_codes": [70000],
+    "error_description": "AADSTS70000: The request was denied because one or more scopes requested are unauthorized or expired.",
+}
+
+
+class TestMissingConsent:
+    def test_it_names_the_scope_and_the_way_to_grant_it(self):
+        app = StubApp(silent_results=[NOT_CONSENTED])
+        manager = make_manager(app)
+        with pytest.raises(CredentialsError) as excinfo:
+            asyncio.run(manager.get_token(CONTACTS_SCOPE_URLS))
+        message = str(excinfo.value)
+        assert "Contacts.ReadWrite" in message
+        assert "AADSTS70000" in message
+        assert "outlook_mcp_auth.py" in message
+        # Not the message for a wrong secret or an expired grant, which is what
+        # acquire_token_silent's None used to turn this into.
+        assert "client secret is wrong" not in message
+
+    def test_a_per_user_grant_points_at_enrolling_again(self):
+        app = StubApp(silent_results=[NOT_CONSENTED])
+        manager = make_manager(app, user="ada@example.com")
+        with pytest.raises(CredentialsError, match="/oauth/login") as excinfo:
+            asyncio.run(manager.get_token(CONTACTS_SCOPE_URLS))
+        assert "ada@example.com" in str(excinfo.value)
+
+    def test_the_work_account_form_is_recognised_too(self):
+        consent_required = {"error": "invalid_grant", "error_codes": [65001], "suberror": "consent_required"}
+        manager = make_manager(StubApp(silent_results=[consent_required]))
+        with pytest.raises(CredentialsError, match="Contacts.ReadWrite"):
+            asyncio.run(manager.get_token(CONTACTS_SCOPE_URLS))
+
+    def test_it_never_falls_through_to_client_credentials(self):
+        # Even on a stdio manager with a verified secret, where an expired grant
+        # would fall through: acting as the application is not a substitute for
+        # a scope the user has not granted.
+        app = StubApp(silent_results=[TOKEN, NOT_CONSENTED], client_results=[TOKEN2])
+        manager = make_manager(app)
+        asyncio.run(manager.get_token())
+        with pytest.raises(CredentialsError):
+            asyncio.run(manager.get_token(CONTACTS_SCOPE_URLS))
+        assert app.client_calls == []
+
+    def test_the_other_tools_keep_working(self):
+        app = StubApp(silent_results=[NOT_CONSENTED, TOKEN])
+        manager = make_manager(app)
+        with pytest.raises(CredentialsError):
+            asyncio.run(manager.get_token(CONTACTS_SCOPE_URLS))
+        assert asyncio.run(manager.get_token()) == "at-1"
+
+    def test_it_does_not_count_as_a_verified_secret(self):
+        app = StubApp(silent_results=[NOT_CONSENTED, TOKEN])
+        manager = make_manager(app)
+        with pytest.raises(CredentialsError):
+            asyncio.run(manager.get_token(CONTACTS_SCOPE_URLS))
+        asyncio.run(manager.get_token())
+        assert app.silent_calls[1]["force_refresh"] is True
+
+
+def write_cache(path, marker):
+    """A token cache file recognisable by a marker, of a size unique to it."""
+    cache = msal.SerializableTokenCache()
+    cache.deserialize('{"AccessToken": {"%s": {}}}' % marker)
+    save_token_cache(cache, path)
+
+
+class TestASignInWhileRunning:
+    """A sign-in rewrites the cache file under a running server.
+
+    To grant a new scope, to replace a grant that stopped working, or to put
+    another account behind the file. A manager that kept its first copy would
+    never see it, and its next write-back would erase it from disk.
+    """
+
+    def manager(self, path, app=None):
+        manager = AuthManager("client-id", "secret", "common", cache_path=path)
+        manager._app = app or StubApp(silent_results=[TOKEN, TOKEN2])
+        return manager
+
+    def test_the_rewritten_file_is_adopted_on_the_next_call(self, tmp_path):
+        path = tmp_path / "cache.json"
+        write_cache(path, "old-grant")
+        manager = self.manager(path)
+        app = manager._app
+
+        write_cache(path, "new-grant-with-contacts")
+        asyncio.run(manager.get_token())
+
+        assert "new-grant-with-contacts" in manager._cache.serialize()
+        # In place: the MSAL application keeps the cache object it was built on.
+        assert manager._app is app
+
+    def test_the_old_grant_is_never_written_over_the_new_one(self, tmp_path):
+        path = tmp_path / "cache.json"
+        write_cache(path, "old-grant")
+        manager = self.manager(path)
+
+        write_cache(path, "new-grant-with-contacts")
+        # What a refresh of the old grant leaves behind, just after the sign-in.
+        manager._cache.has_state_changed = True
+        manager._save_cache()
+
+        assert "new-grant-with-contacts" in path.read_text()
+
+    def test_its_own_write_back_is_not_mistaken_for_a_sign_in(self, tmp_path):
+        path = tmp_path / "cache.json"
+        write_cache(path, "grant")
+        manager = self.manager(path)
+        manager._cache.deserialize('{"AccessToken": {"refreshed-here-and-longer": {}}}')
+        manager._cache.has_state_changed = True
+        manager._save_cache()
+        assert "refreshed-here-and-longer" in path.read_text()
+
+        # Held in memory only: a reload, which only a rewrite by someone else
+        # may trigger, would lose it.
+        manager._cache.deserialize('{"AccessToken": {"in-memory-only": {}}}')
+        manager._adopt_rewritten_cache()
+        assert "in-memory-only" in manager._cache.serialize()
+
+    def test_a_first_enrollment_after_startup_is_picked_up(self, tmp_path):
+        # A caller who used a tool before enrolling used to stay "not
+        # authorized" until the server restarted.
+        path = tmp_path / "ada.json"
+        manager = self.manager(path)
+        assert manager._cache_stamp is None
+
+        write_cache(path, "enrolled")
+        manager._adopt_rewritten_cache()
+        assert "enrolled" in manager._cache.serialize()
+
+    def test_a_deleted_file_empties_the_cache(self, tmp_path):
+        # How an operator withdraws a grant: delete the file.
+        path = tmp_path / "cache.json"
+        write_cache(path, "withdrawn")
+        manager = self.manager(path)
+        path.unlink()
+
+        manager._adopt_rewritten_cache()
+        assert "withdrawn" not in manager._cache.serialize()
 
 
 class TestVerificationIsPerCredentialSet:

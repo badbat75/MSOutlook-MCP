@@ -9,6 +9,7 @@ from typing import List, Optional
 import httpx
 
 from .auth import CredentialsError
+from .contacts import birthday_date
 
 
 # Reusable guidance for building a valid OData $filter (shared by the pre-flight
@@ -103,6 +104,96 @@ def format_event_summary(event: dict) -> str:
         result += f"Attendees: {attendee_list}\n"
     result += f"ID: `{event.get('id', '')}`"
     return result
+
+
+def _contact_emails(contact: dict) -> List[str]:
+    return [e["address"] for e in contact.get("emailAddresses") or [] if e.get("address")]
+
+
+def _contact_phones(contact: dict) -> List[str]:
+    phones = [f"{contact['mobilePhone']} (mobile)"] if contact.get("mobilePhone") else []
+    phones += [f"{p} (home)" for p in contact.get("homePhones") or [] if p]
+    phones += [f"{p} (business)" for p in contact.get("businessPhones") or [] if p]
+    return phones
+
+
+def _contact_birthday(contact: dict) -> Optional[str]:
+    day = birthday_date(contact.get("birthday"))
+    return day.isoformat() if day else None
+
+
+def format_contact_summary(contact: dict) -> str:
+    """Format a contact for a listing: who it is, how to reach them, where it is filed."""
+    result = f"**{contact.get('displayName') or '(no name)'}**\n"
+    if contact.get("nickName"):
+        result += f"Nickname: {contact['nickName']}\n"
+    emails = _contact_emails(contact)
+    if emails:
+        result += f"Email: {', '.join(emails)}\n"
+    phones = _contact_phones(contact)
+    if phones:
+        result += f"Phone: {', '.join(phones)}\n"
+    birthday = _contact_birthday(contact)
+    if birthday:
+        result += f"Birthday: {birthday}\n"
+    if contact.get("folderName"):
+        result += f"Folder: {contact['folderName']}\n"
+    result += f"ID: `{contact.get('id', '')}`"
+    return result
+
+
+def _physical_address(address: Optional[dict]) -> str:
+    parts = ("street", "postalCode", "city", "state", "countryOrRegion")
+    return ", ".join(address[p] for p in parts if address and address.get(p))
+
+
+def format_contact_details(contact: dict, folder: Optional[str] = None) -> str:
+    """Format everything a contact holds, so nothing is lost unseen when it is merged away."""
+    lines = [f"# {contact.get('displayName') or '(no name)'}", ""]
+
+    def add(label: str, value) -> None:
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value if v)
+        if value:
+            lines.append(f"**{label}:** {value}")
+
+    add("Title", contact.get("title"))
+    add("Given name", contact.get("givenName"))
+    add("Middle name", contact.get("middleName"))
+    add("Surname", contact.get("surname"))
+    add("Suffix", contact.get("generation"))
+    add("Nickname", contact.get("nickName"))
+    add("File as", contact.get("fileAs"))
+    for email in contact.get("emailAddresses") or []:
+        address, name = email.get("address"), email.get("name")
+        if address:
+            add("Email", f"{name} <{address}>" if name and name != address else address)
+    add("Mobile", contact.get("mobilePhone"))
+    add("Home phone", contact.get("homePhones"))
+    add("Business phone", contact.get("businessPhones"))
+    add("Birthday", _contact_birthday(contact))
+    add("Company", contact.get("companyName"))
+    add("Job title", contact.get("jobTitle"))
+    add("Department", contact.get("department"))
+    add("Profession", contact.get("profession"))
+    add("Office", contact.get("officeLocation"))
+    add("Home address", _physical_address(contact.get("homeAddress")))
+    add("Business address", _physical_address(contact.get("businessAddress")))
+    add("Other address", _physical_address(contact.get("otherAddress")))
+    add("Web page", contact.get("businessHomePage"))
+    add("IM", contact.get("imAddresses"))
+    add("Spouse", contact.get("spouseName"))
+    add("Children", contact.get("children"))
+    add("Manager", contact.get("manager"))
+    add("Assistant", contact.get("assistantName"))
+    add("Categories", contact.get("categories"))
+    add("Folder", folder)
+    add("Created", contact.get("createdDateTime"))
+    add("Modified", contact.get("lastModifiedDateTime"))
+    lines.append(f"**ID:** `{contact.get('id', '')}`")
+    if contact.get("personalNotes"):
+        lines += ["", "---", "", "**Notes:**", "", contact["personalNotes"]]
+    return "\n".join(lines)
 
 
 def format_graph_datetime(dt_obj: dict) -> str:

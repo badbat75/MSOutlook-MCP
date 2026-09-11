@@ -222,7 +222,9 @@ def main():
     cache = load_token_cache(cache_path)
     app = build_app(cache)
 
-    # Check if we already have a valid token
+    # Check if we already have a valid token, for every scope: a grant made
+    # before a scope was added still serves the tools it covers, and signing in
+    # again is how it gains the rest.
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(GRAPH_SCOPE_URLS, account=accounts[0])
@@ -233,6 +235,10 @@ def main():
             if cache.has_state_changed:
                 save_token_cache(cache, cache_path)
             return
+        print(f"The cached authorization for {accounts[0].get('username', 'this account')}")
+        print("does not cover every permission this server asks for, or has")
+        print("expired. Signing in again; accept the permissions it lists.")
+        print()
 
     if args.user:
         # One file, one account. A per-user cache that accumulated two accounts

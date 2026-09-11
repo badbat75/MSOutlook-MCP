@@ -1,8 +1,8 @@
 # Outlook MCP Server
 
 MCP (Model Context Protocol) server that connects Claude to Microsoft Outlook
-via the Microsoft Graph API. 20 tools covering email, calendar and profile,
-over stdio or streamable HTTP.
+via the Microsoft Graph API. 24 tools covering email, calendar, contacts and
+profile, over stdio or streamable HTTP.
 
 ## Features
 
@@ -32,6 +32,17 @@ over stdio or streamable HTTP.
 | `outlook_delete_event` | Delete event |
 | `outlook_respond_event` | Accept/Decline/Tentative for invitations |
 | `outlook_list_calendars` | List all calendars |
+
+### Contacts
+| Tool | Description |
+|------|-------------|
+| `outlook_list_contacts` | List contacts from every contact folder with name, email, phone, birthday and folder; search by name or address, or by day of birth (e.g. the date of a Birthdays calendar entry) |
+| `outlook_get_contact` | Everything a contact holds: names, emails, phones, addresses, dates, notes |
+| `outlook_update_contact` | Change names, email addresses, phone numbers, birthday or notes |
+| `outlook_delete_contact` | Delete a contact, to Deleted Items |
+
+Enough to merge duplicates: find them, read the one to drop, carry what it has
+over to the one kept, delete it.
 
 ### Profile
 | Tool | Description |
@@ -102,12 +113,15 @@ OutlookMCP/
 │   ├── enroll.py               # /oauth/login + /oauth/callback (HTTP deployments)
 │   ├── downloads.py            # /attachments/<token>: handing a file to a remote caller
 │   ├── folders.py              # Mail folder resolution and rendering
+│   ├── events.py               # All-day events the way Graph insists on them
+│   ├── contacts.py             # Every contact folder, name matching, birthdays
 │   ├── attachments.py          # Inline and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
 │   ├── models.py               # Pydantic input models
-│   └── tools/                  # The 20 tools
+│   └── tools/                  # The 24 tools
 │       ├── mail.py
 │       ├── calendar.py
+│       ├── contacts.py
 │       └── profile.py
 ├── tests/
 │   ├── unit/                   # pytest, no network
@@ -140,6 +154,7 @@ Once configured, you can ask Claude:
 - *"Reply to that email saying I confirm"*
 - *"Cancel Friday's meeting"*
 - *"Accept the meeting invitation for tomorrow"*
+- *"The Birthdays calendar shows Gabriele twice on 7 June: merge the duplicate contacts"*
 
 ---
 
@@ -186,6 +201,7 @@ was never enrolled.
 | Refuses to start on a non-loopback bind | Over HTTP the proxy must be the only way in: bind `127.0.0.1` |
 | `421 Invalid Host header` behind a proxy | A loopback bind makes the MCP SDK accept only localhost as `Host`. Name the site in `[server].allowed_hosts` |
 | `<user> has not authorized this server` | Enrol them: `/oauth/login`, or `outlook-mcp-auth --user <them>` |
+| `The authorization ... does not include Contacts.ReadWrite` | The grant predates the contacts tools; the others keep working. Sign in once more and accept the new permission: `python outlook_mcp_auth.py`, or `/oauth/login` for a user of an HTTP deployment. A running server picks it up without a restart |
 | Browser callback doesn't work | Press Ctrl+C and paste the callback URL manually |
 | Remote/SSH system without GUI | Use `python outlook_mcp_auth.py --no-browser` |
 | `AADSTS...` from Microsoft | [Error-by-error table](docs/SETUP_PERSONAL_ACCOUNTS.md#troubleshooting) |

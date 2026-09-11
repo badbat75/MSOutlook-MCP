@@ -27,7 +27,6 @@ from .auth import (
     AuthManager,
     CredentialsError,
     GraphClient,
-    load_token_cache,
     shared_cache_path,
     user_cache_path,
 )
@@ -108,22 +107,21 @@ class GraphClientPool:
     def __init__(self, cache_dir: Optional[Path] = None):
         # None means the home directory default, which is what auth.py applies.
         self._cache_dir = cache_dir
-        self._shared_path = shared_cache_path(cache_dir)
-        self._token_cache = load_token_cache(self._shared_path)
         self._clients: Dict[Principal, GraphClient] = {}
 
     def get(self, principal: Principal) -> GraphClient:
         client = self._clients.get(principal)
         if client is None:
             creds = principal.credentials
+            # The manager reads its cache from this path when it is created,
+            # not before: it notices a sign-in rewriting the file by comparing
+            # it with what it read, so what it read has to be that file.
             if principal.user is None:
-                cache, cache_path = self._token_cache, self._shared_path
+                cache_path = shared_cache_path(self._cache_dir)
             else:
                 cache_path = user_cache_path(principal.user, self._cache_dir)
-                cache = load_token_cache(cache_path)
             auth = AuthManager(
                 creds.client_id, creds.client_secret, creds.tenant_id,
-                token_cache=cache,
                 cache_path=cache_path,
                 user=principal.user,
             )

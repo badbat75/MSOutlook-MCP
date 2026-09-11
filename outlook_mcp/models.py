@@ -4,6 +4,8 @@ from typing import Any, Literal, Optional, List, get_args
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
+from .contacts import birthday_value, month_day
+
 # An event's "Show as": Graph's freeBusyStatus, less "unknown", which is what
 # Graph reports when it has nothing to say rather than a status anybody sets.
 ShowAs = Literal["free", "tentative", "busy", "oof", "workingElsewhere"]
@@ -348,6 +350,113 @@ class GetAttachmentInput(BaseModel):
 
     message_id: str = Field(..., description="The message ID containing the attachment", min_length=1)
     attachment_id: str = Field(..., description="The attachment ID to download", min_length=1)
+
+
+class ListContactsInput(BaseModel):
+    """Input for listing contacts across every contact folder."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    search: Optional[str] = Field(
+        default=None,
+        description=(
+            "Only contacts with this text in a name or an email address, ignoring "
+            "case and accents: 'gabriele', 'de simoni', 'papa' (finds 'Papà'), "
+            "'@example.com'. Looks at display name, given name, middle name, "
+            "surname, nickname, 'file as' and every email address."
+        ),
+    )
+    birthday: Optional[str] = Field(
+        default=None,
+        description=(
+            "Only contacts whose birthday falls on this day of the year: an ISO "
+            "date, 'YYYY-MM-DD', whose year is ignored (e.g. the date of an entry "
+            "in the Birthdays calendar, '2026-06-07' for 7 June), or '--MM-DD'."
+        ),
+    )
+    top: int = Field(default=50, description="Max contacts to return", ge=1, le=200)
+    skip: int = Field(default=0, description="Number of matching contacts to skip (pagination)", ge=0)
+
+    @field_validator("birthday")
+    @classmethod
+    def validate_birthday(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            month_day(v)
+        return v or None
+
+
+class GetContactInput(BaseModel):
+    """Input for reading one contact."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    contact_id: str = Field(..., description="The contact ID, as outlook_list_contacts shows it", min_length=1)
+
+
+class UpdateContactInput(BaseModel):
+    """Input for updating a contact. Omitted fields are left as they are."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    contact_id: str = Field(..., description="ID of the contact to update", min_length=1)
+    display_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "New display name, the one the contact is listed and its birthday "
+            "shown under. Omit to keep the current one, even when changing the "
+            "name parts: it is never regenerated from them."
+        ),
+    )
+    given_name: Optional[str] = Field(default=None, description="New given (first) name")
+    surname: Optional[str] = Field(default=None, description="New surname (last name)")
+    nickname: Optional[str] = Field(default=None, description="New nickname")
+    email_addresses: Optional[List[str]] = Field(
+        default=None,
+        max_length=3,
+        description=(
+            "The contact's email addresses, replacing all the current ones: pass "
+            "the full list, existing addresses included, to add one (Outlook keeps "
+            "at most three). An empty list removes them all."
+        ),
+    )
+    mobile_phone: Optional[str] = Field(default=None, description="New mobile phone number; '' removes it")
+    home_phones: Optional[List[str]] = Field(
+        default=None,
+        max_length=2,
+        description="Home phone numbers, replacing the current ones (at most two); [] removes them",
+    )
+    business_phones: Optional[List[str]] = Field(
+        default=None,
+        max_length=2,
+        description="Business phone numbers, replacing the current ones (at most two); [] removes them",
+    )
+    birthday: Optional[str] = Field(
+        default=None,
+        description=(
+            "Birthday as 'YYYY-MM-DD', e.g. '2016-06-07'. An empty string removes "
+            "it, which also removes the contact's entry from the Birthdays calendar."
+        ),
+    )
+    personal_notes: Optional[str] = Field(
+        default=None,
+        description="The notes on the contact, replacing the current ones; '' removes them",
+    )
+
+    @field_validator("birthday")
+    @classmethod
+    def validate_birthday(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            birthday_value(v)
+        return v
+
+
+class DeleteContactInput(BaseModel):
+    """Input for deleting a contact. It goes to Deleted Items, recoverable.
+
+    There is deliberately no permanent option: on a personal mailbox, Graph's
+    permanentDelete twice left a contact with a birthday in Deleted Items
+    instead of purging it, once while answering 404.
+    """
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    contact_id: str = Field(..., description="ID of the contact to delete", min_length=1)
 
 
 class DeleteAttachmentFilesInput(BaseModel):

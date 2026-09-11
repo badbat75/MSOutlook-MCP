@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides full access to email and calendar operations through 20 MCP tools.
+Outlook MCP Server - A Model Context Protocol server that connects Claude to Microsoft Outlook via Microsoft Graph API. Provides access to email, calendar and contacts through 24 MCP tools.
 
 **Core Architecture:**
 - **`MCPServer` from the official `mcp` SDK 2.x** (`mcp.server.mcpserver`; the 1.x `FastMCP` import no longer exists) for tool registration and server lifecycle
@@ -30,20 +30,22 @@ OutlookMCP/
 │   ├── downloads.py            # /attachments/<token>, the per-user/per-message file layout
 │   ├── folders.py              # Well-known aliases, name lookup, folder tree rendering
 │   ├── events.py               # All-day spans, reading an event's times in its own zone
+│   ├── contacts.py             # Every contact folder, name matching, birthdays
 │   ├── attachments.py          # Inline (<=3MB) and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
 │   ├── models.py               # Pydantic input models
-│   └── tools/                  # The 20 @mcp.tool() definitions
-│       ├── __init__.py         # Imports the three modules = registers every tool
+│   └── tools/                  # The 24 @mcp.tool() definitions
+│       ├── __init__.py         # Imports the four modules = registers every tool
 │       ├── mail.py             # 12 email tools
 │       ├── calendar.py         # 7 calendar tools
+│       ├── contacts.py         # 4 contact tools
 │       └── profile.py          # 1 profile tool
 ├── scripts/
 │   ├── deploy.sh                   # Deploy to a Linux host as a systemd service
 │   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
 │   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
-│   ├── unit/                   # pytest, no network: config, credentials, auth, enroll, downloads, events
+│   ├── unit/                   # pytest, no network: config, credentials, auth, enroll, downloads, events, contacts
 │   └── integration/            # Hand-run scripts that call the real Graph API
 │       ├── test_mcp_server.py  # JSON-RPC over stdio
 │       └── test_http_server.py # Streamable HTTP, identity as a header
@@ -113,7 +115,10 @@ The project uses a **two-command approach** for OAuth2:
 
 3. **Server Runtime** (`outlook_mcp_server.py` → `outlook_mcp/server.py`):
    - Loads the cache belonging to the caller via `AuthManager` in `outlook_mcp/auth.py`
-   - Handles automatic token refresh via MSAL
+   - Handles automatic token refresh via MSAL, asking for the scopes of the
+     resource each request addresses (see "Scopes per Resource" below)
+   - Picks up a cache file a sign-in rewrote while it ran, and never writes its
+     own older copy over it
    - Falls back to client credentials only for the single-user (stdio) manager;
      a per-user manager raises instead, so an unenrolled caller is never handed
      a token that acts as the application
@@ -241,6 +246,14 @@ The app registration must have these **delegated permissions**:
 - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`
 - `Calendars.Read`, `Calendars.ReadWrite`
 - `User.Read`
+- `Contacts.ReadWrite`
+
+For personal accounts consent is dynamic: what a sign-in asks for
+(`auth.GRAPH_SCOPES`) is what the user is shown and grants, and on 2026-09-11
+the authorize endpoint accepted `Contacts.ReadWrite` for app `576e9b99` before
+it was on the registration's list. Keep the list in step all the same: a work
+tenant or a `.default` request needs it, and whether it also mattered to an old
+grant gaining the scope is open (see "Scopes per Resource").
 
 Redirect URIs: `http://localhost:5000/callback` for `outlook-mcp-auth`, plus
 `<public_url>/oauth/callback` when browser enrollment is enabled.
@@ -380,17 +393,18 @@ rendered systemd unit, starts the service. The invariants behind it:
 | `outlook_mcp/app.py` | The `mcp = MCPServer(...)` instance, `app_lifespan` (builds the `GraphClientPool`, starts and cancels the download reaper), `get_config()` / `set_config()`. Tool modules import `mcp` from here, which is what keeps server.py free to import the tools |
 | `outlook_mcp/server.py` | Entry point only: `_parse_args()`, `main()`, and the `from . import tools` whose side effect registers them |
 | `outlook_mcp/config.py` | `PROJECT_ROOT`, `ServerConfig` + `load_config()`, `is_loopback()`, `_validate_deployment()`. The whole configuration, and the only place any of it comes from |
-| `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_config()`, `ProxyAuthPolicy`, `Principal`, `GraphClientPool`, `current_user()`, `get_graph()` |
-| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, one cache and one cache path per principal), `GraphClient` (async HTTP), `load_token_cache()` / `save_token_cache()` / `user_cache_path()` / `shared_cache_path()`, `CredentialsError`, and the shared constants `GRAPH_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `USER_CACHE_DIR` / `authority_for()`. The two path helpers take an optional directory, `None` meaning the home-directory default, so a caller can pass `config.cache_directory` straight through |
+| `outlook_mcp/credentials.py` | `Credentials`, `credentials_from_config()`, `ProxyAuthPolicy`, `Principal`, `GraphClientPool`, `current_user()`, `get_graph()`. The pool hands each `AuthManager` a path, never a preloaded cache: see "Scopes per Resource" |
+| `outlook_mcp/auth.py` | `AuthManager` (MSAL token lifecycle, one cache and one cache path per principal, `_adopt_rewritten_cache()`), `GraphClient` (async HTTP), `load_token_cache()` / `save_token_cache()` / `user_cache_path()` / `shared_cache_path()`, `CredentialsError`, `scopes_for()`, and the shared constants `GRAPH_SCOPE_URLS` (what a sign-in asks for) / `CORE_SCOPE_URLS` / `CONTACTS_SCOPE_URLS` / `REDIRECT_URI` / `TOKEN_CACHE_PATH` / `USER_CACHE_DIR` / `authority_for()`. The two path helpers take an optional directory, `None` meaning the home-directory default, so a caller can pass `config.cache_directory` straight through |
 | `outlook_mcp/authorize.py` | The OAuth2 authorization code flow: browser, headless, `--code` and `--user` modes. The only place that flow lives |
 | `outlook_mcp/enroll.py` | The two enrollment routes and the in-memory table of sign-ins in flight |
 | `outlook_mcp/downloads.py` | The `/attachments/<token>` route, the in-memory table of one-time links, `download_root()` / `message_dir()` (where a downloaded file goes), `offer()`, `delete_message_downloads()`, `_consume_file()` (delete on serve) and `sweep()` / `reap_expired_downloads()` (delete on expiry) |
 | `outlook_mcp/folders.py` | `WELL_KNOWN_FOLDERS`, `find_folder_id_by_name()`, `resolve_folder()`, `format_folder_tree()` |
 | `outlook_mcp/events.py` | `all_day_span()` (what Graph accepts as an all-day event), `describe_all_day()`, `read_event_times()` (an event's times in its own zone, via `Prefer: outlook.timezone`) |
+| `outlook_mcp/contacts.py` | `read_all()` (follows `@odata.nextLink`), `contact_folders()`, `read_address_book()` (every folder, each contact tagged `folderName`), `folder_name()`, `matches()` (case and accent blind), `month_day()`, `birthday_date()` / `birthday_value()` / `BIRTHDAY_TIME`, `in_deleted_items()`, `sort_key()` |
 | `outlook_mcp/attachments.py` | `read_attachment_meta()`, `attach_small_file()` (<=3MB inline), `attach_large_file()` (upload session), `attach_files()` |
-| `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`, `format_attachment_summary()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `save_attachment_to_disk()` |
+| `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`, `format_attachment_summary()`, `format_contact_summary()`, `format_contact_details()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `save_attachment_to_disk()` |
 | `outlook_mcp/models.py` | All Pydantic v2 input models with validation |
-| `outlook_mcp/tools/` | The `@mcp.tool()` definitions, split mail / calendar / profile |
+| `outlook_mcp/tools/` | The `@mcp.tool()` definitions, split mail / calendar / contacts / profile |
 
 ### Principal Resolution (`get_graph`)
 
@@ -446,6 +460,57 @@ How it is enforced in `get_token()`:
 
 Both paths set `_secret_verified` on success, after which the cache is used
 normally. `tests/unit/test_auth.py` pins all of it.
+
+### Scopes per Resource, and Adding a Permission
+
+**A sign-in asks for every scope; a request asks only for the scopes of the
+resource it addresses.** `GraphClient.request()` passes `scopes_for(endpoint)`
+to `get_token()`: `/me/contacts*` and `/me/contactFolders*` (any casing, an
+absolute `@odata.nextLink` included) get `CONTACTS_SCOPE_URLS`, everything
+else `CORE_SCOPE_URLS`. Measured on 2026-09-11 against the personal account,
+and the reason for all of it:
+
+- A refresh token asked for a single scope its grant lacks fails the **whole**
+  request: `invalid_grant`, `AADSTS70000` ("one or more scopes requested are
+  unauthorized or expired"); a work account answers `AADSTS65001` with the
+  `consent_required` suberror. Requesting the full list on every call would
+  have turned mail and calendar off for every grant made before contacts
+  existed, and `acquire_token_silent` reports that refusal as `None`, which the
+  old code turned into "the client secret is wrong".
+- **What happens after the user consents is not settled.** Two observations,
+  same account and app, the same day. A refresh token issued before the
+  consent, redeemed directly for `Contacts.ReadWrite` two minutes after it,
+  still got `AADSTS70000`. Yet the rpi-01 grant, enrolled on 2026-08-28 without
+  contacts and never re-enrolled, served the contacts tools forty minutes after
+  the consent, with no sign-in there. In between, the user's itadmin agent had
+  added the permission to the registration, and on rpi-01 a core-scope refresh
+  had just rotated the token. Which of the three (time, the registration, a
+  token issued after the consent) made the difference is unknown, and no
+  pre-consent token is left to retry. Do not document either outcome as a rule.
+
+So `get_token()` uses `acquire_token_silent_with_error`, and `_lacks_consent()`
+turns those codes into a `CredentialsError` that names the missing scope and the
+way to grant it (`_consent_message()`). It never falls through to client
+credentials, and it does not count as a verified secret. A sign-in on the
+installation that reports it always fixes it.
+
+**A sign-in while the server runs must take effect, and must not be undone.**
+A sign-in rewrites the cache to grant a new scope, to replace a grant that
+stopped working, or to put another account behind the file. `AuthManager`
+records the file's `(mtime_ns, size)` when it reads or writes it;
+`_adopt_rewritten_cache()` runs at the top of every `get_token()` and reloads
+the cache in place when the file changed under it (a deleted file becomes an
+empty cache), and `_save_cache()` refuses to write when the file is not the one
+it last saw. Before this, a running server kept its first copy until
+restarted, and its next refresh wrote that copy back over the sign-in. It also
+fixes a user who called a tool before enrolling staying "not authorized" until
+a restart. That is why the pool no longer preloads the shared cache at startup:
+the copy a manager holds has to be the file as it was when the manager read it.
+
+To add a permission later: add a scope list in `auth.py`, include it in
+`GRAPH_SCOPES`, map its resource paths in `_RESOURCE_SCOPE_URLS`, add it to the
+registration and the docs. Existing users keep every other tool; the new ones
+tell them to sign in again until the scope is theirs.
 
 ### Downloaded Attachments (`downloads.py`)
 
@@ -534,6 +599,12 @@ Consequences worth keeping in mind:
 - `outlook_respond_event` - Accept/decline/tentative with optional comment
 - `outlook_list_calendars` - List all calendars in account
 
+**Contact Tools (4):**
+- `outlook_list_contacts` - Every contact folder, not just the default one; name, email, phone, birthday, folder, ID. `search` matches names and addresses ignoring case and accents; `birthday` takes an ISO date whose year is ignored (or `--MM-DD`), which is how to find the contacts behind a Birthdays calendar entry. Sorted by name, nameless last; `top`/`skip` page the filtered list
+- `outlook_get_contact` - Everything a contact holds, so a duplicate is read before it is deleted
+- `outlook_update_contact` - Names, email addresses (at most 3), phones (mobile, at most 2 home and 2 business), birthday (`''` removes it), notes. Lists replace; the display name always goes along unless given
+- `outlook_delete_contact` - To Deleted Items, named in the answer. No permanent option, on purpose
+
 **Profile Tool (1):**
 - `outlook_get_profile` - Current user profile info
 
@@ -592,6 +663,47 @@ resource docs. Probed against a real mailbox:
   it at 00:00 in whatever zone is asked for, `originalStartTimeZone` included.
 - `showAs` accepts any casing at Graph; the model normalizes it anyway so the
   schema can carry an `enum`. A new event without it is `busy`, all-day or not.
+
+### Contacts (`contacts.py`)
+
+Written for a request to merge duplicate contacts: three entries on 7 June in
+the Birthdays calendar, which shows only the day and the month. Everything below
+was measured against the real mailbox on 2026-09-11.
+
+- **`/me/contacts` is the default folder only.** That mailbox also has
+  "HUAWEI P40 Pro (contacts synced by Link to Windows)", 135 contacts inside the
+  default one: exactly where a duplicate lives. `contact_folders()` starts from
+  `/me/contactFolders/contacts` (the well-known name resolves to the default
+  folder, which `/me/contactFolders` does not list) and walks `childFolders`.
+  `/me/contacts/{id}` does reach a contact in any folder.
+- **No name search at Graph.** `$filter` on a contact reaches only
+  `emailAddresses/any(a:a/address eq '...')`, so the whole address book is read
+  (342 contacts: two pages) and matched here.
+- **Birthdays are instants.** Every one of the 21 in the mailbox sits at
+  `T11:59:00Z`, what Outlook writes, and the Birthdays calendar shows its UTC
+  date. The tools read the UTC date and write `YYYY-MM-DDT11:59:00Z`. A contact
+  with a birthday gets a Birthdays entry `"<displayName> birthday"` within
+  seconds, and loses it when the birthday is removed or the contact deleted.
+- **A Birthdays entry without the " birthday" suffix is not from a contact.**
+  The third 7 June entry, plain "Gabriele", matched no contact in any folder:
+  it is a yearly all-day series created on 2017-07-03, while an entry generated
+  from a contact is created within a second of the contact. That one is for
+  `outlook_delete_event`; merging contacts leaves it alone.
+- **An update that leaves out `displayName` regenerates it.** A PATCH of
+  `givenName` alone turned "Zz Test MCP (temporaneo)" into "Qq Test MCP", as the
+  contact resource doc warns. `outlook_update_contact` reads the current one and
+  sends it along. Email addresses already on the contact keep their `name`.
+- **Phones synced from a phone put odd things in odd fields**: "Gabriele, Amore
+  di Papà" has the endearment in `generation` (the suffix). `get_contact` shows
+  every populated field for that reason.
+- **No permanent delete.** `permanentDelete` purged a contact without a
+  birthday, but twice left one with a birthday in Deleted Items, once answering
+  404. An option that says "not recoverable" and is not is worse than none.
+- **`DELETE` has answered 404 while carrying itself out**, three times in a
+  few minutes, on contacts given a birthday seconds before; not reproduced in
+  about a dozen tries since, with the server log capturing every Graph error.
+  `in_deleted_items()` looks for the contact there by name and creation time
+  (the move changes the ID) before a 404 is reported.
 
 ### Well-Known Folder Names
 
@@ -669,6 +781,8 @@ is never registered.
 - Server logs go to stderr (the SDK's `MCPServer` configures logging); the HTTP startup banner is printed to stderr too, never to stdout
 - Token cache issues: delete `~/.outlook_mcp_token_cache.json` and re-auth. For one user of an HTTP deployment the file is `<sha256(lowercased address)>.json` under `[auth].cache_dir`, or under `~/.outlook_mcp/caches/` when unset; `outlook_mcp.auth.user_cache_path()` computes it, and `shared_cache_path()` the single-account one. Never guess the path: ask the deployed code, `load_config(<its toml>)` then `user_cache_path(address, config.cache_directory)`
 - "\<user\> has not authorized this server": that user has no cache, or nothing usable in it. Not a bug, and deliberately not a fallback: they enrol at `/oauth/login`, or an operator runs `outlook-mcp-auth --user <them>`
+- "The authorization ... does not include Contacts.ReadWrite": the user has not consented to the scope, or this installation's token has not caught up with a consent given elsewhere. Every other tool still works; the fix is one more sign-in on that installation (`python outlook_mcp_auth.py`, or `/oauth/login` for a user of an HTTP deployment), and the running server adopts the rewritten cache on the next call. Never copy a cache in from another host instead (see Deployment)
+- A sign-in that "did not take": the server logs `Token cache <file> was rewritten, reloaded` when it adopts one. No such line means the sign-in wrote a different file than the server reads; compute both with `user_cache_path()` / `shared_cache_path()` rather than guessing
 - "No valid token available", or "Could not obtain a token for this client id", together with `AADSTS700016` from MSAL, means the app registration behind the client id no longer exists in the directory: that is an Azure-side problem, not a code regression. The second message comes from the secret verification described above, which is the first thing to fail when the registration is gone
 - A download link that answers 404: it is single use and the fetch deleted the file, or it expired after `downloads.TICKET_TTL_SECONDS`. The table is in memory, so a restart invalidates every outstanding link. All of that is by design; the fix is to call `outlook_get_attachment` again. A **401 or a redirect to a login page** is a different problem and not the server's: the proxy is authenticating `/attachments/`, which it must not
 - A downloaded file that vanished from `download_path` before anyone deleted it: `[attachments].retention_minutes` (default 60). The sweep logs how many it took
@@ -684,3 +798,4 @@ is never registered.
 - **Meeting creation** sets `isOnlineMeeting: true` to auto-generate Teams link
 - **Folder moves** accept either folder ID or well-known name string
 - **Attendee types** are: `required`, `optional`, `resource`
+- **Contacts**: `/me/contacts` is the default folder only; `$filter` reaches only `emailAddresses/any(a:a/address eq ...)`; a PATCH without `displayName` may regenerate it; see "Contacts" above

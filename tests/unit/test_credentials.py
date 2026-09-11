@@ -11,7 +11,7 @@ import types
 import msal
 import pytest
 
-from outlook_mcp.auth import CredentialsError
+from outlook_mcp.auth import CredentialsError, save_token_cache, shared_cache_path
 from outlook_mcp.config import ServerConfig
 from outlook_mcp import credentials as credentials_module
 from outlook_mcp.credentials import (
@@ -145,8 +145,21 @@ class TestGraphClientPool:
     def test_the_stdio_principal_uses_the_shared_cache(self, isolated_caches):
         pool = GraphClientPool(isolated_caches)
         client = pool.get(Principal(SERVER_CREDS))
-        assert client.auth._cache is pool._token_cache
+        assert client.auth._cache_path == shared_cache_path(isolated_caches)
         assert client.auth.user is None
+
+    def test_a_sign_in_after_startup_is_what_the_first_call_reads(self, isolated_caches):
+        # The pool used to read the shared cache when the server started and
+        # hand that copy to a manager created on the first tool call, however
+        # much later. A manager compares the file with what it read to notice a
+        # sign-in, so what it read has to be the file as it is when it is made.
+        pool = GraphClientPool(isolated_caches)
+        cache = msal.SerializableTokenCache()
+        cache.deserialize('{"AccessToken": {"signed-in-later": {}}}')
+        save_token_cache(cache, shared_cache_path(isolated_caches))
+
+        client = pool.get(Principal(SERVER_CREDS))
+        assert "signed-in-later" in client.auth._cache.serialize()
 
 
 def make_ctx(lifespan_context, request=None):

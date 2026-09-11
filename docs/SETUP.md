@@ -33,7 +33,7 @@ error that does not explain itself.
 7. **API permissions > Add a permission > Microsoft Graph > Delegated
    permissions**, add all of:
    `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Calendars.Read`,
-   `Calendars.ReadWrite`, `User.Read`.
+   `Calendars.ReadWrite`, `User.Read`, `Contacts.ReadWrite`.
 8. Grant admin consent if your tenant requires it.
 
 ---
@@ -103,7 +103,17 @@ outlook-mcp-auth                          # the installed console script
 
 Sign in, accept the permissions, and the tokens are written to
 `~/.outlook_mcp_token_cache.json`. MSAL refreshes them from then on; re-run
-this only if you see `401` errors that persist.
+this only if you see `401` errors that persist, or when a new version of the
+server asks for a permission your grant does not include yet.
+
+That last case is how the contacts tools arrived. An authorization made before
+them may lack `Contacts.ReadWrite`: mail and calendar keep working, and the
+contacts tools answer that the permission is missing and how to grant it. Run
+the command again and accept the new permission. A server already running picks
+the new grant up on its next call; no restart is needed. Once you have
+consented, another installation of the same account may start serving contacts
+without a sign-in of its own; one that still reports the permission missing
+needs that sign-in.
 
 If the browser opens but the callback never arrives (a remote machine, a
 firewall), press Ctrl+C and paste the full callback URL when prompted.
@@ -353,6 +363,12 @@ Either way, enrolling again replaces that user's previous grant rather than
 adding a second account to the same cache. A user who has never enrolled gets
 an error saying so; they are never quietly served an application-level token.
 
+Enrolling again is also how a user grants a permission added by a newer
+version of the server, `Contacts.ReadWrite` for the contacts tools, when those
+tools say it is missing: everything else keeps working meanwhile. The running
+service notices the rewritten cache on that user's next call, so no restart is
+needed, and it never writes its older copy back over the new grant.
+
 ### 4. Getting attachments back out
 
 `outlook_get_attachment` writes the file to the machine the **server** runs on.
@@ -549,6 +565,7 @@ it starts, from any shell or any working directory.
 | `No X-Auth-Email header on this request` | A proxy location forwarding without `proxy_set_header X-Auth-Email` |
 | `421 Invalid Host header` | From the MCP SDK, not nginx: a loopback bind turns on DNS-rebinding protection, which accepts only localhost. Put the site in `[server].allowed_hosts` |
 | `<user> has not authorized this server` | That user has never enrolled: `/oauth/login`, or `outlook-mcp-auth --user <them>` |
+| `The authorization ... does not include Contacts.ReadWrite` | The grant predates the contacts tools. Sign in once more and accept it: `python outlook_mcp_auth.py`, or `/oauth/login` for one user of an HTTP deployment. No restart needed |
 | An attachment answers with a server path instead of a link | `[auth].public_url` is not set, so the server cannot say what URL it is reachable on |
 | `This download link is not valid` | It has been used (which also deleted the file), it is over fifteen minutes old, or the server restarted. Ask for the attachment again |
 | A download link answers `401` from nginx | `/attachments/` is behind the proxy's authentication. It must not be: the agent that has to fetch it holds no key. See step 2 |

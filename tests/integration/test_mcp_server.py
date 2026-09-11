@@ -266,6 +266,10 @@ def test_tools_list(client):
         "outlook_update_event",
         "outlook_delete_event",
         "outlook_respond_event",
+        "outlook_list_contacts",
+        "outlook_get_contact",
+        "outlook_update_contact",
+        "outlook_delete_contact",
     ]
     missing = [t for t in expected if t not in tool_names]
     assert not missing, f"Missing tools: {missing}"
@@ -333,6 +337,15 @@ def test_list_calendars(client):
         "arguments": {"params": {"top": 10}},
     })
     return _assert_tool_success(resp, "outlook_list_calendars")
+
+
+def test_list_contacts(client):
+    """Call outlook_list_contacts: needs Contacts.ReadWrite in the grant."""
+    resp = client.send("tools/call", {
+        "name": "outlook_list_contacts",
+        "arguments": {"params": {"top": 3}},
+    })
+    return _assert_tool_success(resp, "outlook_list_contacts")
 
 
 def test_list_attachments(client):
@@ -414,6 +427,7 @@ ALL_TESTS = QUICK_TESTS + [
     ("List Mail (unread)", test_list_mail_unread),
     ("List Calendars", test_list_calendars),
     ("List Events (today)", test_list_events),
+    ("List Contacts", test_list_contacts),
     ("List Attachments", test_list_attachments),
     ("Get Attachment", test_get_attachment),
 ]

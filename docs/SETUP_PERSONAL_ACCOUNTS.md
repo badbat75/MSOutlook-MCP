@@ -81,6 +81,7 @@ After registration, you'll see the Overview page:
    - ✅ `Calendars.Read`
    - ✅ `Calendars.ReadWrite`
    - ✅ `User.Read`
+   - ✅ `Contacts.ReadWrite`
 6. Click **Add permissions**
 
 **Note:** Admin consent is NOT required for personal accounts. Users will consent when they first log in.

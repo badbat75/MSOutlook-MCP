@@ -4,13 +4,16 @@ import hashlib
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 import msal
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
-GRAPH_SCOPES = [
+
+# Mail, calendar and profile: what every grant has held since the first release.
+CORE_SCOPES = [
     "Mail.Read",
     "Mail.ReadWrite",
     "Mail.Send",
@@ -18,10 +21,62 @@ GRAPH_SCOPES = [
     "Calendars.ReadWrite",
     "User.Read",
 ]
+CONTACTS_SCOPES = ["Contacts.ReadWrite"]
 
-# The same list as Graph expects it on the wire. Both the server and the
-# authorization flow request exactly these, so they are defined once.
-GRAPH_SCOPE_URLS = [f"https://graph.microsoft.com/{s}" for s in GRAPH_SCOPES]
+# What a sign-in asks for: everything any tool needs. Both the authorization
+# command and browser enrollment request exactly these, so they are defined once.
+GRAPH_SCOPES = CORE_SCOPES + CONTACTS_SCOPES
+
+
+def _scope_urls(scopes: List[str]) -> List[str]:
+    """The scopes as Graph expects them on the wire."""
+    return [f"https://graph.microsoft.com/{s}" for s in scopes]
+
+
+GRAPH_SCOPE_URLS = _scope_urls(GRAPH_SCOPES)
+CORE_SCOPE_URLS = _scope_urls(CORE_SCOPES)
+CONTACTS_SCOPE_URLS = _scope_urls(CONTACTS_SCOPES)
+
+# A request asks only for the scopes of the resource it addresses, never for the
+# whole list. A refresh token redeems for the scopes its user has consented to
+# and no more, and asking for a single one outside them fails the entire
+# request (AADSTS70000 from a personal account, AADSTS65001 from a work one).
+# Asking for everything would therefore have turned every mail and calendar tool
+# off for each grant made before contacts existed, until its owner consented to
+# the new scope. This way only the tools that need it ask for it.
+_RESOURCE_SCOPE_URLS = {
+    "/me/contacts": CONTACTS_SCOPE_URLS,
+    "/me/contactfolders": CONTACTS_SCOPE_URLS,
+}
+
+
+def scopes_for(endpoint: str) -> List[str]:
+    """The scope URLs a Graph request needs, from the resource it addresses.
+
+    ``endpoint`` is a path relative to GRAPH_BASE_URL, or the absolute URL of an
+    @odata.nextLink. Graph paths are case-insensitive, and the docs themselves
+    spell both ``contactFolders`` and ``contactfolders``.
+    """
+    path = urlparse(endpoint).path.casefold()
+    path = path.removeprefix(urlparse(GRAPH_BASE_URL).path)
+    for prefix, scopes in _RESOURCE_SCOPE_URLS.items():
+        if path.startswith(prefix):
+            return scopes
+    return CORE_SCOPE_URLS
+
+
+# What AAD answers when a refresh token is asked for a scope its grant does not
+# include: AADSTS70000 "one or more scopes requested are unauthorized or
+# expired" (measured on a personal account), AADSTS65001 "has not consented"
+# (a work account, which also sets the consent_required suberror).
+_CONSENT_ERROR_CODES = {65001, 70000}
+
+
+def _lacks_consent(result: Optional[dict]) -> bool:
+    if not result or result.get("error") != "invalid_grant":
+        return False
+    codes = set(result.get("error_codes") or [])
+    return bool(codes & _CONSENT_ERROR_CODES) or result.get("suberror") == "consent_required"
 
 # Must match the redirect URI registered on the Azure AD app registration.
 REDIRECT_URI = "http://localhost:5000/callback"
@@ -84,18 +139,24 @@ class CredentialsError(RuntimeError):
 
 
 def load_token_cache(path: Path = TOKEN_CACHE_PATH) -> msal.SerializableTokenCache:
-    """Load the MSAL token cache written by outlook_mcp_auth.py (empty if absent).
-
-    One cache instance can back several ``AuthManager`` objects: MSAL keys every
-    entry by client id, so tokens for different app registrations coexist and a
-    single serialize() call persists all of them. Give each AuthManager its own
-    cache object only if they must never see each other's tokens, which is
-    exactly what the per-user caches above are for.
-    """
+    """Load the MSAL token cache written by outlook_mcp_auth.py (empty if absent)."""
     cache = msal.SerializableTokenCache()
     if path.exists():
         cache.deserialize(path.read_text())
     return cache
+
+
+def _file_stamp(path: Path) -> Optional[Tuple[int, int]]:
+    """What changes when a file is rewritten: its modification time and size.
+
+    None when there is no file. Any other failure to stat it propagates: a
+    cache that cannot be looked at cannot be written back either.
+    """
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_mtime_ns, st.st_size
 
 
 def save_token_cache(cache: msal.SerializableTokenCache, path: Path) -> None:
@@ -125,7 +186,6 @@ class AuthManager:
         client_id: str,
         client_secret: str,
         tenant_id: str,
-        token_cache: Optional[msal.SerializableTokenCache] = None,
         cache_path: Path = TOKEN_CACHE_PATH,
         user: Optional[str] = None,
     ):
@@ -139,22 +199,54 @@ class AuthManager:
         # off (see get_token), because acting as the application is precisely
         # what an unenrolled user must not be able to do.
         self.user = user
-        # A caller may hand in a cache shared with other managers (HTTP mode,
-        # one manager per set of header credentials); otherwise load our own.
-        self._cache = token_cache if token_cache is not None else load_token_cache(cache_path)
-        # Where that cache is written back. It travels with the cache object: a
-        # manager holding one user's cache must never persist it over the shared
-        # file, which is how every user would end up sharing one account.
+        # One manager, one file: the cache is read from the path it is written
+        # back to. A manager holding one user's cache must never persist it over
+        # the shared file, which is how every user would end up sharing one
+        # account.
         self._cache_path = cache_path
+        self._cache = load_token_cache(cache_path)
+        # The file as this manager last read or wrote it. Anything else on disk
+        # was written by someone else: see _adopt_rewritten_cache().
+        self._cache_stamp = _file_stamp(cache_path)
         self._app: Optional[msal.ConfidentialClientApplication] = None
         # Whether AAD has confirmed this client secret at least once. Until it
         # has, no token may be served out of the cache. See get_token().
         self._secret_verified = False
 
+    def _adopt_rewritten_cache(self) -> None:
+        """Take up the cache file when someone else has rewritten it since.
+
+        A sign-in writes it while the server runs: outlook-mcp-auth from another
+        process, or /oauth/login in this one, to grant a new scope, to replace a
+        grant that stopped working, or to put another account behind the file.
+        Without this the server would go on with the copy it read at its first
+        call until restarted, and its next write-back would put that copy back
+        over the sign-in. A user who called a tool before enrolling would stay
+        "not authorized" the same way. A deleted file is adopted too, as an
+        empty cache: that is how an operator withdraws a grant.
+
+        Reloaded in place, so the MSAL application keeps its cache object.
+        """
+        stamp = _file_stamp(self._cache_path)
+        if stamp == self._cache_stamp:
+            return
+        self._cache.deserialize(self._cache_path.read_text() if stamp else "{}")
+        self._cache_stamp = stamp
+        logger.info("Token cache %s was rewritten, reloaded", self._cache_path.name)
+
     def _save_cache(self):
-        """Persist token cache to disk."""
-        if self._cache.has_state_changed:
-            save_token_cache(self._cache, self._cache_path)
+        """Persist the token cache, unless someone else has rewritten the file since.
+
+        The other writer is a sign-in, and its grant is the newer one: this
+        manager's tokens came from the grant it replaces. The next call adopts
+        it rather than overwriting it.
+        """
+        if not self._cache.has_state_changed:
+            return
+        if _file_stamp(self._cache_path) != self._cache_stamp:
+            return
+        save_token_cache(self._cache, self._cache_path)
+        self._cache_stamp = _file_stamp(self._cache_path)
 
     @property
     def app(self) -> msal.ConfidentialClientApplication:
@@ -180,8 +272,11 @@ class AuthManager:
             authority=self.authority,
         )
 
-    async def get_token(self) -> str:
-        """Get a valid access token, refreshing if needed.
+    async def get_token(self, scopes: Optional[List[str]] = None) -> str:
+        """Get a valid access token for `scopes`, refreshing if needed.
+
+        `scopes` are the ones the request at hand needs (see scopes_for), the
+        core mail, calendar and profile set when not given.
 
         The first token for a given set of credentials always costs one round
         trip to AAD, because that request is where AAD authenticates the client
@@ -192,19 +287,27 @@ class AuthManager:
         only over HTTP, where the credentials arrive in request headers, but the
         guard belongs here where the token is produced.
         """
-        scopes = GRAPH_SCOPE_URLS
+        scopes = scopes or CORE_SCOPE_URLS
+        self._adopt_rewritten_cache()
         accounts = self.app.get_accounts()
 
         if accounts:
             # Redeeming the refresh token is a request AAD authenticates with
-            # the client secret, so forcing it is what proves ownership.
-            result = self.app.acquire_token_silent(
+            # the client secret, so forcing it is what proves ownership. The
+            # "with_error" variant, because acquire_token_silent turns every
+            # refusal into None, and a missing consent needs its own answer.
+            result = self.app.acquire_token_silent_with_error(
                 scopes, account=accounts[0], force_refresh=not self._secret_verified
             )
             if result and "access_token" in result:
                 self._secret_verified = True
                 self._save_cache()
                 return result["access_token"]
+            if _lacks_consent(result):
+                # Neither a wrong secret nor an expired grant: the grant is
+                # fine for what it covers, and falling through to app-only
+                # would be wrong for the same reason as for any delegated user.
+                raise CredentialsError(self._consent_message(scopes, result))
             if not self._secret_verified:
                 # A wrong secret and a stale refresh token look the same from
                 # here, and we must not fall through to a cached token, so both
@@ -245,6 +348,19 @@ class AuthManager:
             return "re-run python outlook_mcp_auth.py"
         return f"re-run outlook-mcp-auth --user {self.user}, or sign in again at /oauth/login"
 
+    def _consent_message(self, scopes: List[str], result: dict) -> str:
+        """Why a grant that works for other tools cannot serve this one."""
+        names = ", ".join(s.rsplit("/", 1)[-1] for s in scopes)
+        codes = ", ".join(f"AADSTS{c}" for c in result.get("error_codes") or []) or "invalid_grant"
+        whose = f"for {self.user}" if self.user else "this server holds"
+        return (
+            f"The authorization {whose} does not include {names}, which this "
+            f"tool needs ({codes}). "
+            f"It was most likely granted before this server asked for it; the "
+            f"other tools keep working meanwhile. To grant it, sign in once more "
+            f"and accept the new permission: {self._reauthorize_hint()}."
+        )
+
 
 # =============================================================================
 # Microsoft Graph API Client
@@ -277,8 +393,12 @@ class GraphClient:
         `headers` is added to the ones every request carries, e.g. a Prefer
         naming the time zone Graph should answer in. It cannot replace the
         Authorization header.
+
+        `endpoint` may also be the absolute URL of an @odata.nextLink: httpx
+        ignores base_url for an absolute URL, and the scopes are read off its
+        path all the same.
         """
-        token = await self.auth.get_token()
+        token = await self.auth.get_token(scopes_for(endpoint))
         client = await self._get_client()
         headers = {
             "Content-Type": "application/json",

@@ -5,4 +5,4 @@ Importing this package is what registers the tools: each module runs its
 server.py imports it for that side effect alone.
 """
 
-from . import calendar, mail, profile  # noqa: F401
+from . import calendar, contacts, mail, profile  # noqa: F401
