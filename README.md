@@ -27,8 +27,8 @@ over stdio or streamable HTTP.
 |------|-------------|
 | `outlook_list_events` | List events in a date range across all calendars (expands recurring series) |
 | `outlook_get_event` | Full event details with attendees and Teams meeting links |
-| `outlook_create_event` | Create event with location, attendees, Teams meeting |
-| `outlook_update_event` | Modify or cancel event |
+| `outlook_create_event` | Create event with location, attendees, Teams meeting, all-day, "Show as" (free, busy...) |
+| `outlook_update_event` | Modify or cancel event, make it all-day or timed, change "Show as" |
 | `outlook_delete_event` | Delete event |
 | `outlook_respond_event` | Accept/Decline/Tentative for invitations |
 | `outlook_list_calendars` | List all calendars |

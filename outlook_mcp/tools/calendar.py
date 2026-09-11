@@ -7,6 +7,7 @@ from mcp.server.mcpserver import Context
 
 from ..app import mcp
 from ..credentials import get_graph
+from ..events import all_day_span, describe_all_day, read_event_times
 from ..helpers import (
     format_event_summary,
     format_graph_datetime,
@@ -169,22 +170,28 @@ async def outlook_get_event(params: GetEventInput, ctx: Context = None) -> str:
 async def outlook_create_event(params: CreateEventInput, ctx: Context = None) -> str:
     """Create a new calendar event with optional attendees and Teams meeting.
 
-    Supports setting location, body, reminders, recurrence, and online meeting creation.
+    Supports setting location, body, reminders, recurrence, online meeting
+    creation, all-day events and how the event shows on the calendar (free, busy...).
 
     Returns:
         str: Confirmation with the new event ID and details.
     """
     try:
         graph = get_graph(ctx)
+        start, end = params.start, params.end
+        if params.is_all_day:
+            start, end = all_day_span(start, end)
         event_body: Dict[str, Any] = {
             "subject": params.subject,
-            "start": {"dateTime": params.start, "timeZone": params.timezone},
-            "end": {"dateTime": params.end, "timeZone": params.timezone},
+            "start": {"dateTime": start, "timeZone": params.timezone},
+            "end": {"dateTime": end, "timeZone": params.timezone},
             "isOnlineMeeting": params.is_online_meeting,
             "isAllDay": params.is_all_day,
             "reminderMinutesBeforeStart": params.reminder_minutes,
         }
 
+        if params.show_as:
+            event_body["showAs"] = params.show_as
         if params.body:
             event_body["body"] = {"contentType": "HTML", "content": params.body}
         if params.location:
@@ -220,7 +227,12 @@ async def outlook_create_event(params: CreateEventInput, ctx: Context = None) ->
 
         result = f"✅ Event created!\n"
         result += f"**Subject:** {params.subject}\n"
-        result += f"**When:** {params.start} → {params.end} ({params.timezone})\n"
+        if params.is_all_day:
+            result += f"**When:** {describe_all_day(start, end)}\n"
+        else:
+            result += f"**When:** {start} → {end} ({params.timezone})\n"
+        if params.show_as:
+            result += f"**Show as:** {params.show_as}\n"
         if params.location:
             result += f"**Location:** {params.location}\n"
         if params.is_online_meeting:
@@ -245,35 +257,59 @@ async def outlook_create_event(params: CreateEventInput, ctx: Context = None) ->
 async def outlook_update_event(params: UpdateEventInput, ctx: Context = None) -> str:
     """Update properties of an existing calendar event.
 
+    Can also make it all-day, or timed again, and change how it shows on the
+    calendar (free, busy...).
+
     Returns:
         str: Confirmation of applied changes.
     """
     try:
         graph = get_graph(ctx)
-        updates: Dict[str, Any] = {}
+        if params.is_cancelled:
+            await graph.post(f"/me/events/{params.event_id}/cancel", json_data={})
+            return f"✅ Event `{params.event_id}` has been cancelled."
 
+        start, end, zone = params.start, params.end, params.timezone
+        if params.is_all_day is not None and not start:
+            # Graph refuses isAllDay without Event.Start, whichever way it flips
+            # and even on an event already at midnight: the current times go
+            # with it, read where their day is the right one.
+            start, current_end, zone = await read_event_times(graph, params.event_id, zone)
+            end = end or current_end
+        if params.is_all_day:
+            start, end = all_day_span(start, end)
+        # One zone for both: Graph refuses an all-day event whose start and end
+        # are in different ones.
+        zone = zone or "UTC"
+
+        updates: Dict[str, Any] = {}
         if params.subject:
             updates["subject"] = params.subject
-        if params.start:
-            tz = params.timezone or "UTC"
-            updates["start"] = {"dateTime": params.start, "timeZone": tz}
-        if params.end:
-            tz = params.timezone or "UTC"
-            updates["end"] = {"dateTime": params.end, "timeZone": tz}
+        if start:
+            updates["start"] = {"dateTime": start, "timeZone": zone}
+        if end:
+            updates["end"] = {"dateTime": end, "timeZone": zone}
         if params.location:
             updates["location"] = {"displayName": params.location}
         if params.body:
             updates["body"] = {"contentType": "HTML", "content": params.body}
-        if params.is_cancelled:
-            await graph.post(f"/me/events/{params.event_id}/cancel", json_data={})
-            return f"✅ Event `{params.event_id}` has been cancelled."
+        if params.is_all_day is not None:
+            updates["isAllDay"] = params.is_all_day
+        if params.show_as:
+            updates["showAs"] = params.show_as
 
         if not updates:
             return "No updates specified."
 
         await graph.patch(f"/me/events/{params.event_id}", json_data=updates)
         changes = ", ".join(updates.keys())
-        return f"✅ Event updated ({changes}). ID: `{params.event_id}`"
+        result = f"✅ Event updated ({changes}). ID: `{params.event_id}`"
+        # The days or times may have been derived here rather than given: say which.
+        if params.is_all_day:
+            result += f"\n**When:** {describe_all_day(start, end)}"
+        elif params.is_all_day is False and end:
+            result += f"\n**When:** {start} → {end} ({zone})"
+        return result
     except Exception as e:
         return handle_graph_error(e)
 

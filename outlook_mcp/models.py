@@ -1,8 +1,25 @@
 """Pydantic input models for all MCP tools."""
 
-from typing import Optional, List
+from typing import Any, Literal, Optional, List, get_args
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
+
+# An event's "Show as": Graph's freeBusyStatus, less "unknown", which is what
+# Graph reports when it has nothing to say rather than a status anybody sets.
+ShowAs = Literal["free", "tentative", "busy", "oof", "workingElsewhere"]
+_SHOW_AS_BY_LOWER = {value.lower(): value for value in get_args(ShowAs)}
+
+SHOW_AS_DESCRIPTION = (
+    "How the event shows on the calendar (Outlook's 'Show as'): 'free', "
+    "'tentative', 'busy', 'oof' (out of office) or 'workingElsewhere'."
+)
+
+
+def canonical_show_as(value: Any) -> Any:
+    """Graph's spelling of a status given in any casing ('WORKINGELSEWHERE')."""
+    if isinstance(value, str):
+        return _SHOW_AS_BY_LOWER.get(value.strip().lower(), value)
+    return value
 
 
 class ListMailInput(BaseModel):
@@ -179,11 +196,18 @@ class CreateEventInput(BaseModel):
     subject: str = Field(..., description="Event title/subject", min_length=1)
     start: str = Field(
         ...,
-        description="Start datetime in ISO format, e.g. '2025-06-15T10:00:00'"
+        description=(
+            "Start datetime in ISO format, e.g. '2025-06-15T10:00:00'. "
+            "For an all-day event a date is enough: '2025-06-15'."
+        )
     )
     end: str = Field(
         ...,
-        description="End datetime in ISO format, e.g. '2025-06-15T11:00:00'"
+        description=(
+            "End datetime in ISO format, e.g. '2025-06-15T11:00:00'. For an "
+            "all-day event, the last day as a date: '2025-06-15' for one day, "
+            "'2025-06-16' for two."
+        )
     )
     timezone: str = Field(
         default="UTC",
@@ -194,12 +218,24 @@ class CreateEventInput(BaseModel):
     attendees: Optional[List[str]] = Field(default=None, description="List of attendee email addresses")
     is_online_meeting: bool = Field(default=False, description="Create as Teams meeting")
     reminder_minutes: int = Field(default=15, description="Reminder before event in minutes", ge=0)
-    is_all_day: bool = Field(default=False, description="All-day event")
+    is_all_day: bool = Field(
+        default=False,
+        description="All-day event: start and end are widened to whole days, midnight to midnight",
+    )
+    show_as: Optional[ShowAs] = Field(
+        default=None,
+        description=SHOW_AS_DESCRIPTION + " Omit for Outlook's default, busy.",
+    )
     recurrence: Optional[str] = Field(
         default=None,
         description="Recurrence pattern: 'daily', 'weekly', 'monthly', or null for none"
     )
     calendar_id: Optional[str] = Field(default=None, description="Target calendar ID (omit for default)")
+
+    @field_validator("show_as", mode="before")
+    @classmethod
+    def validate_show_as(cls, v: Any) -> Any:
+        return canonical_show_as(v)
 
 
 class UpdateEventInput(BaseModel):
@@ -208,12 +244,46 @@ class UpdateEventInput(BaseModel):
 
     event_id: str = Field(..., description="ID of the event to update")
     subject: Optional[str] = Field(default=None, description="New subject")
-    start: Optional[str] = Field(default=None, description="New start datetime (ISO format)")
-    end: Optional[str] = Field(default=None, description="New end datetime (ISO format)")
-    timezone: Optional[str] = Field(default=None, description="Timezone for start/end")
+    start: Optional[str] = Field(
+        default=None,
+        description="New start datetime (ISO format). With is_all_day=true a date is enough.",
+    )
+    end: Optional[str] = Field(
+        default=None,
+        description=(
+            "New end datetime (ISO format). With is_all_day=true, the last day "
+            "as a date; omit it for a one-day event."
+        ),
+    )
+    timezone: Optional[str] = Field(
+        default=None,
+        description=(
+            "Timezone for start/end, e.g. 'Europe/Rome' (default UTC). When "
+            "is_all_day is set without start, the event's current days are read "
+            "in this zone, or in the event's own zone if omitted."
+        ),
+    )
     location: Optional[str] = Field(default=None, description="New location")
     body: Optional[str] = Field(default=None, description="New body content")
+    is_all_day: Optional[bool] = Field(
+        default=None,
+        description=(
+            "true makes it an all-day event, widened to the whole days it covers, "
+            "midnight to midnight: the days of start/end when given, otherwise "
+            "the days it is on now. false makes it a timed event again: pass the "
+            "new start and end, or it keeps its current times. Omit to leave it."
+        ),
+    )
+    show_as: Optional[ShowAs] = Field(
+        default=None,
+        description=SHOW_AS_DESCRIPTION + " Omit to leave it unchanged.",
+    )
     is_cancelled: bool = Field(default=False, description="Cancel the event")
+
+    @field_validator("show_as", mode="before")
+    @classmethod
+    def validate_show_as(cls, v: Any) -> Any:
+        return canonical_show_as(v)
 
 
 class DeleteEventInput(BaseModel):

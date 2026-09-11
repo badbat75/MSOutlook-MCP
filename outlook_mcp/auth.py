@@ -270,14 +270,20 @@ class GraphClient:
             await self._client.aclose()
 
     async def request(
-        self, method: str, endpoint: str, **kwargs
+        self, method: str, endpoint: str, headers: Optional[dict] = None, **kwargs
     ) -> dict:
-        """Make an authenticated request to the Graph API."""
+        """Make an authenticated request to the Graph API.
+
+        `headers` is added to the ones every request carries, e.g. a Prefer
+        naming the time zone Graph should answer in. It cannot replace the
+        Authorization header.
+        """
         token = await self.auth.get_token()
         client = await self._get_client()
         headers = {
-            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            **(headers or {}),
+            "Authorization": f"Bearer {token}",
         }
         response = await client.request(
             method, endpoint, headers=headers, **kwargs
@@ -301,8 +307,10 @@ class GraphClient:
             return {"status": "success"}
         return response.json()
 
-    async def get(self, endpoint: str, params: Optional[dict] = None) -> dict:
-        return await self.request("GET", endpoint, params=params)
+    async def get(
+        self, endpoint: str, params: Optional[dict] = None, headers: Optional[dict] = None
+    ) -> dict:
+        return await self.request("GET", endpoint, params=params, headers=headers)
 
     async def post(self, endpoint: str, json_data: Optional[dict] = None) -> dict:
         return await self.request("POST", endpoint, json=json_data)

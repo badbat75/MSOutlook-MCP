@@ -29,6 +29,7 @@ OutlookMCP/
 │   ├── enroll.py               # /oauth/login + /oauth/callback: users enrol themselves
 │   ├── downloads.py            # /attachments/<token>, the per-user/per-message file layout
 │   ├── folders.py              # Well-known aliases, name lookup, folder tree rendering
+│   ├── events.py               # All-day spans, reading an event's times in its own zone
 │   ├── attachments.py          # Inline (<=3MB) and upload-session attachment writing
 │   ├── helpers.py              # Formatting, error handling, $filter validation
 │   ├── models.py               # Pydantic input models
@@ -42,7 +43,7 @@ OutlookMCP/
 │   ├── generate-claude-config.ps1  # Generate Claude Desktop config (Windows)
 │   └── generate-claude-config.sh   # Generate Claude Desktop config (macOS/Linux)
 ├── tests/
-│   ├── unit/                   # pytest, no network: config, credentials, auth, enroll, downloads
+│   ├── unit/                   # pytest, no network: config, credentials, auth, enroll, downloads, events
 │   └── integration/            # Hand-run scripts that call the real Graph API
 │       ├── test_mcp_server.py  # JSON-RPC over stdio
 │       └── test_http_server.py # Streamable HTTP, identity as a header
@@ -385,6 +386,7 @@ rendered systemd unit, starts the service. The invariants behind it:
 | `outlook_mcp/enroll.py` | The two enrollment routes and the in-memory table of sign-ins in flight |
 | `outlook_mcp/downloads.py` | The `/attachments/<token>` route, the in-memory table of one-time links, `download_root()` / `message_dir()` (where a downloaded file goes), `offer()`, `delete_message_downloads()`, `_consume_file()` (delete on serve) and `sweep()` / `reap_expired_downloads()` (delete on expiry) |
 | `outlook_mcp/folders.py` | `WELL_KNOWN_FOLDERS`, `find_folder_id_by_name()`, `resolve_folder()`, `format_folder_tree()` |
+| `outlook_mcp/events.py` | `all_day_span()` (what Graph accepts as an all-day event), `describe_all_day()`, `read_event_times()` (an event's times in its own zone, via `Prefer: outlook.timezone`) |
 | `outlook_mcp/attachments.py` | `read_attachment_meta()`, `attach_small_file()` (<=3MB inline), `attach_large_file()` (upload session), `attach_files()` |
 | `outlook_mcp/helpers.py` | Formatting (`format_email_summary()`, `format_event_summary()`, `format_attachment_summary()`), `handle_graph_error()`, `make_recipients()`, `validate_odata_filter()`, `save_attachment_to_disk()` |
 | `outlook_mcp/models.py` | All Pydantic v2 input models with validation |
@@ -526,8 +528,8 @@ Consequences worth keeping in mind:
 **Calendar Tools (7):**
 - `outlook_list_events` - Date range filtering, expands recurring series; with no `calendar_id` it aggregates events across ALL calendars (Calendar, Birthdays, Your Family, etc.), each tagged with its source calendar name
 - `outlook_get_event` - Full event details with attendees and Teams meeting links
-- `outlook_create_event` - Supports location, attendees, Teams meeting creation
-- `outlook_update_event` - PATCH updates for event modifications
+- `outlook_create_event` - Supports location, attendees, Teams meeting creation, `is_all_day` and `show_as` (free, tentative, busy, oof, workingElsewhere)
+- `outlook_update_event` - PATCH updates for event modifications, including `is_all_day` and `show_as`; see "All-Day Events" below for why it is more than a pass-through
 - `outlook_delete_event` - Delete single event
 - `outlook_respond_event` - Accept/decline/tentative with optional comment
 - `outlook_list_calendars` - List all calendars in account
@@ -564,6 +566,32 @@ Graph API uses **dateTimeTimeZone** objects:
 ```
 
 Tools accept ISO 8601 strings and convert to this format via `format_graph_datetime()` in `outlook_mcp/helpers.py`.
+
+### All-Day Events (`events.py`)
+
+Graph is strict about all-day events, and none of it shows in the event
+resource docs. Probed against a real mailbox:
+
+- An all-day event must run **midnight to midnight**, the end exclusive and at
+  least 24 hours after the start, both ends in **the same time zone**. Anything
+  else is a 400.
+- A PATCH carrying `isAllDay`, **true or false**, is refused unless `start`
+  comes with it ("Missing parameters: Event.Start"), even when the event already
+  sits on midnight. Forwarding the flag alone therefore never works, which is
+  why `outlook_update_event` reads the event's current times when the caller
+  gives none and sends them along.
+- Those times are read in the caller's `timezone`, else the event's own
+  (`originalStartTimeZone`), via `Prefer: outlook.timezone`. Never in the UTC
+  Graph answers in by default: midnight in Rome is 22:00 the day before in UTC,
+  which would make the event all-day on the wrong day.
+- `all_day_span()` widens whatever it gets to the days it touches. An end given
+  as a date is the last day (inclusive); an end given as a time is an instant,
+  so one at midnight is exclusive. The second rule is what makes reading an
+  all-day event back and passing its times in again a no-op.
+- Once all-day, the mailbox stores the event as a floating date: a GET reports
+  it at 00:00 in whatever zone is asked for, `originalStartTimeZone` included.
+- `showAs` accepts any casing at Graph; the model normalizes it anyway so the
+  schema can carry an `enum`. A new event without it is `busy`, all-day or not.
 
 ### Well-Known Folder Names
 
